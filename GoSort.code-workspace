@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "GoSort",
+			"path": "../PlatformIO/Projects/GoSort"
+		}
+	],
+	"settings": {}
+}

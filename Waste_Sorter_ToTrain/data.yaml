@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 9
+names: ['Bottles', 'Cans', 'Cardbox', 'Cup', 'Foil', 'Food', 'Paper', 'Paper-bag', 'Plastic']
+
+roboflow:
+  workspace: arts-thesis
+  project: waste-sorter-tui1u
+  version: 4
+  license: Public Domain
+  url: https://universe.roboflow.com/arts-thesis/waste-sorter-tui1u/dataset/4

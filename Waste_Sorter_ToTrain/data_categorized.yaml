@@ -1,0 +1,18 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 3  # number of categories
+names: ['biodegradable', 'recyclable', 'non_biodegradable']
+
+# Original to new mapping:
+# biodegradable: Food, Paper, Paper-bag, Cardbox
+# recyclable: Bottles, Cans, Cardbox
+# non_biodegradable: Plastic, Foil, Cup
+
+roboflow:
+  workspace: arts-thesis
+  project: waste-sorter-tui1u
+  version: 4
+  license: Public Domain
+  url: https://universe.roboflow.com/arts-thesis/waste-sorter-tui1u/dataset/4
