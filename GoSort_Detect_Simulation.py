@@ -54,7 +54,7 @@ def scan_network():
 
     def check_ip(ip):
         try:
-            response = requests.get(f"http://{ip}/GoSort/gs_DB/trash_detected.php", 
+            response = requests.get(f"http://{ip}/GoSort_Web/gs_DB/trash_detected.php", 
                                  timeout=0.5)
             if response.status_code == 200 or (
                 response.status_code == 400 and 

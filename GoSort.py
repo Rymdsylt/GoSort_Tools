@@ -50,7 +50,7 @@ def scan_network():
 
     def check_ip(ip):
         try:
-            response = requests.get(f"http://{ip}/GoSort/gs_DB/trash_detected.php", 
+            response = requests.get(f"http://{ip}/GoSort_Web/gs_DB/trash_detected.php", 
                                  timeout=0.5)
             if response.status_code == 200 or (
                 response.status_code == 400 and 
@@ -75,7 +75,7 @@ def scan_network():
 def check_server(ip):
     print("\rChecking server...", end="", flush=True)
     try:
-        response = requests.get(f"http://{ip}/GoSort/gs_DB/trash_detected.php", timeout=5)
+        response = requests.get(f"http://{ip}/GoSort_Web/gs_DB/trash_detected.php", timeout=5)
         if response.status_code == 200 or (response.status_code == 400 and "No trash type provided" in response.text):
             print("\r✅ Server connection successful!")
             return True
@@ -176,9 +176,36 @@ def connect_to_arduino(port):
         print(f"Unexpected error while connecting to {port}: {e}")
         return None
 
+def check_maintenance_command():
+    command_file = 'maintenance_command.txt'
+    if os.path.exists(command_file):
+        with open(command_file, 'r') as f:
+            command = f.read().strip()
+        os.remove(command_file)
+        return command
+    return None
+
+def send_heartbeat(ip_address):
+    try:
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/connection_status.php"
+        response = requests.post(url)
+        if response.status_code != 200:
+            print(f"❌ Failed to send heartbeat: {response.text}")
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error sending heartbeat: {e}")
+
 def main():
     ip_address = get_ip_address()
     print(f"\nUsing GoSort server at: {ip_address}")
+    
+    # Start heartbeat thread
+    def heartbeat_loop():
+        while True:
+            send_heartbeat(ip_address)
+            time.sleep(1)
+    
+    heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
+    heartbeat_thread.start()
     
     mega_ports = list_arduino_ports()
     
@@ -216,6 +243,18 @@ def main():
     print("q. Quit")
     
     while True:
+        # Check for maintenance commands
+        maintenance_command = check_maintenance_command()
+        if maintenance_command:
+            if maintenance_command in ['bio', 'nbio', 'recyc']:
+                ser.write(f"{maintenance_command}\n".encode())
+                time.sleep(0.1)
+                while ser.in_waiting:
+                    response = ser.readline().decode().strip()
+                    if response:
+                        print(f"🟢 Arduino (Maintenance): {response}")
+                continue
+
         choice = input("\nChoose option (1-3, r for IP config, q to quit): ")
         
         choice = choice.lower()
@@ -240,7 +279,7 @@ def main():
             ser.write(serial_data[choice].encode())
 
             try:
-                url = f"http://{ip_address}/GoSort/gs_DB/trash_detected.php"
+                url = f"http://{ip_address}/GoSort_Web/gs_DB/trash_detected.php"
                 response = requests.get(url, params={'type': trash_type})
                 if response.status_code == 200:
                     print("✅ Detection recorded in database")

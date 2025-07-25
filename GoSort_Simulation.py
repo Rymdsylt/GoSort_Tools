@@ -48,7 +48,7 @@ def scan_network():
 
     def check_ip(ip):
         try:
-            response = requests.get(f"http://{ip}/GoSort/gs_DB/trash_detected.php", 
+            response = requests.get(f"http://{ip}/GoSort_Web/gs_DB/trash_detected.php", 
                                  timeout=0.5)
             if response.status_code == 200 or (
                 response.status_code == 400 and 
@@ -73,7 +73,7 @@ def scan_network():
 def check_server(ip):
     print("\rChecking server...", end="", flush=True)
     try:
-        response = requests.get(f"http://{ip}/GoSort/gs_DB/trash_detected.php", timeout=5)
+        response = requests.get(f"http://{ip}/GoSort_Web/gs_DB/trash_detected.php", timeout=5)
         if response.status_code == 200 or (response.status_code == 400 and "No trash type provided" in response.text):
             print("\r✅ Server connection successful!")
             return True
@@ -183,7 +183,7 @@ def main():
             simulated_arduino.simulate_movement(trash_type)
 
             try:
-                url = f"http://{ip_address}/GoSort/gs_DB/trash_detected.php"
+                url = f"http://{ip_address}/GoSort_Web/gs_DB/trash_detected.php"
                 response = requests.get(url, params={'type': trash_type})
                 if response.status_code == 200:
                     print("✅ Detection recorded in database")
