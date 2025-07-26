@@ -83,10 +83,18 @@ def scan_network():
 def check_server(ip):
     print("\rChecking server...", end="", flush=True)
     try:
+        # Try the new path first
+        response = requests.get(f"http://{ip}/GoSort_Web/gs_DB/trash_detected.php", timeout=5)
+        if response.status_code == 200 or (response.status_code == 400 and "No trash type provided" in response.text):
+            print("\r✅ Server connection successful!")
+            return True
+            
+        # If that fails, try the legacy path
         response = requests.get(f"http://{ip}/GoSort/gs_DB/trash_detected.php", timeout=5)
         if response.status_code == 200 or (response.status_code == 400 and "No trash type provided" in response.text):
             print("\r✅ Server connection successful!")
             return True
+            
         print("\r❌ GoSort does not exist in this server")
         return False
     except requests.exceptions.RequestException:

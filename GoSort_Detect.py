@@ -82,7 +82,7 @@ def scan_network():
 def check_server(ip):
     print("\rChecking server...", end="", flush=True)
     try:
-        response = requests.get(f"http://{ip}/GoSort/gs_DB/trash_detected.php", timeout=5)
+        response = requests.get(f"http://{ip}/GoSort_Web/gs_DB/trash_detected.php", timeout=5)
         # The server returns 400 with "No trash type provided" if it exists
         if response.status_code == 200 or (response.status_code == 400 and "No trash type provided" in response.text):
             print("\r✅ Server connection successful!")
