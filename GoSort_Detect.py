@@ -12,12 +12,15 @@ import socket
 import concurrent.futures
 import threading
 
+def is_maintenance_mode():
+    return os.path.exists('python_maintenance_mode.txt')
+
 def load_config():
     config_file = 'gosort_config.json'
     if os.path.exists(config_file):
         with open(config_file, 'r') as f:
             return json.load(f)
-    return {'ip_address': None}
+    return {'ip_address': None, 'sorter_id': None}
 
 def save_config(config):
     with open('gosort_config.json', 'w') as f:
@@ -265,10 +268,78 @@ def list_available_cameras(max_cams=10):
     
     return available
 
+def check_maintenance_command():
+    command_file = 'maintenance_command.txt'
+    if os.path.exists(command_file):
+        with open(command_file, 'r') as f:
+            command = f.read().strip()
+        os.remove(command_file)
+        return command
+    return None
+
+def get_or_create_auth_token(ip_address):
+    token_file = 'python_auth_token.txt'
+    if os.path.exists(token_file):
+        with open(token_file, 'r') as f:
+            return f.read().strip()
+    
+    try:
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/connection_status.php"
+        response = requests.post(url, data={'token': ''})
+        if os.path.exists(token_file):
+            with open(token_file, 'r') as f:
+                return f.read().strip()
+    except:
+        pass
+    return None
+
+def send_heartbeat(ip_address, auth_token, device_identity):
+    try:
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/connection_status.php"
+        response = requests.post(url, json={
+            'token': auth_token,
+            'identity': device_identity
+        })
+        if response.status_code != 200:
+            print(f"❌ Error sending heartbeat: {response.status_code}")
+        return True
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error sending heartbeat: {e}")
+        return False
+
+def request_registration(ip_address, identity):
+    try:
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/request_registration.php"
+        response = requests.post(
+            url,
+            json={'identity': identity},
+            headers={'Content-Type': 'application/json'}
+        )
+        if response.status_code == 200:
+            return True
+        return False
+    except Exception as e:
+        print(f"❌ Error requesting registration: {e}")
+        return False
+
 def main():
     # Get IP address first
     ip_address = get_ip_address()
     print(f"\nUsing GoSort server at: {ip_address}")
+
+    config = load_config()
+    sorter_id = config.get('sorter_id')
+    
+    # Get authentication token
+    auth_token = get_or_create_auth_token(ip_address)
+    if not auth_token:
+        print("❌ Failed to get authentication token")
+        return
+
+    # Request registration if needed
+    if not request_registration(ip_address, sorter_id):
+        print("❌ Failed to register device")
+        return
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
