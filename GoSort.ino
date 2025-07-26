@@ -6,6 +6,9 @@ Servo rotateServo;  // Servo for rotation (D8)
 Servo tiltServo;    // Servo for tilting (D9)
 String inputString = "";
 bool isSorting = false;
+bool maintenanceMode = false;
+unsigned long lastMaintenanceScrollTime = 0;
+int maintenanceScrollPos = 0;
 
 // LCD 1602 I2C address is commonly 0x27 or 0x3F
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -165,13 +168,25 @@ void setup() {
 
 
 void loop() {
-  while (Serial.available() && !isSorting) {
+  // Handle maintenance mode scrolling text
+  if (maintenanceMode) {
+    unsigned long currentTime = millis();
+    if (currentTime - lastMaintenanceScrollTime >= 300) { // Scroll every 300ms
+      String maintText = "Maintenance Mode... Standby   ";
+      lcd.setCursor(0, 0);
+      lcd.print(maintText.substring(maintenanceScrollPos, maintenanceScrollPos + 16));
+      maintenanceScrollPos = (maintenanceScrollPos + 1) % (maintText.length() - 15);
+      lastMaintenanceScrollTime = currentTime;
+    }
+  }
+
+  while (Serial.available() && (!isSorting || maintenanceMode)) {
     char inChar = (char)Serial.read();
     inputString += inChar;
 
     if (inChar == '\n' || inChar == '\r') {
       inputString.trim();
-      isSorting = true;
+      isSorting = !maintenanceMode; // Only set sorting flag if not in maintenance mode
 
       if (inputString == "nbio") {
         lcd.setCursor(0, 0);
@@ -226,6 +241,92 @@ void loop() {
 
         Serial.println("Moved to recyclable position");
         Serial.println("ready");
+      }
+      // Maintenance mode commands
+      else if (inputString == "maintmode") {
+        maintenanceMode = true;
+        maintenanceScrollPos = 0;
+        lcd.clear();
+        Serial.println("Entered maintenance mode");
+      }
+      else if (inputString == "maintend") {
+        maintenanceMode = false;
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Ready             ");
+        lcd.setCursor(0, 1);
+        lcd.print("Awaiting command  ");
+        Serial.println("Exited maintenance mode");
+      }
+      // Maintenance unclog command
+      else if (maintenanceMode && inputString == "unclog") {
+          lcd.setCursor(0, 1);
+          lcd.print("Unclogging...    ");
+          
+          // Get D8's current position before unclogging
+          int currentD8Position = rotateServo.read();  // Read current angle
+          
+          // Keep D8 at its current stuck position by not sending any new commands to it
+          // Only operate D9 (tilt) for unclogging
+          tiltServo.write(150);    // Tilt to maximum unclog position
+          delay(3000);             // Hold for 3 seconds
+          tiltServo.write(tiltNeutralPos); // Return tilt to neutral
+          
+          // No movement command sent to D8, so it stays where it was stuck
+          
+          lcd.setCursor(0, 1);
+          lcd.print("Unclog at: ");
+          lcd.print(currentD8Position);   // Show the position where unclog happened
+          delay(2000);             // Show position for 2 seconds
+          
+          Serial.print("Unclog complete at position: ");
+          Serial.println(currentD8Position);
+          Serial.println("ready");
+      }
+      // Test sweep D8 only
+      else if (maintenanceMode && inputString == "sweep1") {
+          lcd.setCursor(0, 0);
+          lcd.print("Test Sweep D8    ");
+          lcd.setCursor(0, 1);
+          lcd.print("Testing...       ");
+
+          // Sweep D8 through all positions
+          rotateServo.write(nbioPos);    // Go to non-bio (0°)
+          delay(1000);
+          rotateServo.write(bioPos);     // Go to bio (90°)
+          delay(1000);
+          rotateServo.write(recycPos);   // Go to recyclable (180°)
+          delay(1000);
+          rotateServo.write(neutralPos); // Return to neutral (90°)
+          
+          Serial.println("D8 sweep test complete");
+          Serial.println("ready");
+      }
+      // Test sweep both servos
+      else if (maintenanceMode && inputString == "sweep2") {
+          lcd.setCursor(0, 0);
+          lcd.print("Full Sweep Test  ");
+          lcd.setCursor(0, 1);
+          lcd.print("Testing...       ");
+
+          // Set D9 to maintenance position
+          tiltServo.write(150);
+          delay(1000);
+
+          // Sweep D8 through all positions
+          rotateServo.write(nbioPos);    // Go to non-bio (0°)
+          delay(1000);
+          rotateServo.write(bioPos);     // Go to bio (90°)
+          delay(1000);
+          rotateServo.write(recycPos);   // Go to recyclable (180°)
+          delay(1000);
+          
+          // Return both to neutral
+          rotateServo.write(neutralPos); // D8 to neutral (90°)
+          tiltServo.write(tiltNeutralPos);  // D9 to neutral (85°)
+          
+          Serial.println("Full sweep test complete");
+          Serial.println("ready");
       }
 
       // Reset to "Ready"
