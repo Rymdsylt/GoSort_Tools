@@ -11,8 +11,22 @@ import ipaddress
 import msvcrt
 import sys
 
-def is_maintenance_mode():
-    return os.path.exists('python_maintenance_mode.txt')
+def check_maintenance_mode(ip_address, device_identity):
+    try:
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/check_maintenance.php"
+        response = requests.post(
+            url,
+            json={'identity': device_identity},
+            headers={'Content-Type': 'application/json'}
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('success'):
+                return data.get('maintenance_mode') == 1
+        return False
+    except Exception as e:
+        print(f"\n❌ Error checking maintenance mode: {e}")
+        return False
 
 def load_config():
     config_file = 'gosort_config.json'
@@ -188,52 +202,26 @@ def connect_to_arduino(port):
         print(f"Unexpected error while connecting to {port}: {e}")
         return None
 
-def check_maintenance_command():
-    command_file = 'maintenance_command.txt'
-    if os.path.exists(command_file):
-        with open(command_file, 'r') as f:
-            command = f.read().strip()
-        os.remove(command_file)
-        return command
-    return None
-
-def get_or_create_auth_token(ip_address):
-    token_file = 'python_auth_token.txt'
-    if os.path.exists(token_file):
-        with open(token_file, 'r') as f:
-            return f.read().strip()
-    
-    # First heartbeat will create the token on the server
+def add_to_waiting_devices(ip_address, device_identity):
     try:
-        url = f"http://{ip_address}/GoSort_Web/gs_DB/connection_status.php"
-        response = requests.post(url, data={'token': ''})
-        if os.path.exists(token_file):  # Server should have created the token
-            with open(token_file, 'r') as f:
-                return f.read().strip()
-    except:
-        pass
-    return None
-
-def send_heartbeat(ip_address, auth_token, device_identity):
-    try:
-        url = f"http://{ip_address}/GoSort_Web/gs_DB/connection_status.php"
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/add_waiting_device.php"
         response = requests.post(url, json={
-            'token': auth_token,
             'identity': device_identity
         })
-        if response.status_code != 200:
-            if response.status_code == 401:  # Token invalid or expired
-                return False
-            print(f"❌ Failed to send heartbeat: {response.text}")
-        return True
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Error sending heartbeat: {e}")
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('success'):
+                return True
+            print(f"\n❌ Server error: {data.get('message', 'Unknown error')}")
+        return False
+    except Exception as e:
+        print(f"\n❌ Error adding device to waiting list: {e}")
         return False
 
 def request_registration(ip_address, identity):
     try:
-        # First check if the device is already registered
-        url = f"http://{ip_address}/GoSort_Web/gs_DB/request_registration.php"
+        # First check if device is in sorters table
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/verify_sorter.php"
         response = requests.post(
             url,
             json={'identity': identity},
@@ -243,13 +231,21 @@ def request_registration(ip_address, identity):
             data = response.json()
             if data.get('success'):
                 if data.get('registered'):
-                    # Device is already registered, store the token
-                    token = data.get('token')
-                    with open('python_auth_token.txt', 'w') as f:
-                        f.write(token)
-                    return True, token
-                # Not registered yet, keep waiting
-                return False, None
+                    return True, None
+                else:
+                    # Try to add to waiting devices
+                    response = requests.post(
+                        f"http://{ip_address}/GoSort_Web/gs_DB/add_waiting_device.php",
+                        json={'identity': identity}
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get('success'):
+                            if 'already in waiting list' in data.get('message', ''):
+                                return False, "duplicate"
+                            print("\n✅ Added to waiting devices list")
+                            return False, None
+                    return False, None
             print(f"\n❌ Server error: {data.get('message', 'Unknown error')}")
         return False, None
     except Exception as e:
@@ -294,11 +290,18 @@ def main():
         print("\nPress any other key to check registration status...")
 
     while not registered:
-        registered, auth_token = request_registration(ip_address, config['sorter_id'])
+        registered, status = request_registration(ip_address, config['sorter_id'])
         
         if registered:
             print("\n✅ Device registration confirmed!")
             break
+        elif status == "duplicate":
+            print("\n❌ This identity is already in the waiting list")
+            sorter_id = input("Please enter a different Sorter Identity: ")
+            config['sorter_id'] = sorter_id
+            save_config(config)
+            first_request = True
+            continue
         elif first_request:
             print("\n⏳ Waiting for admin approval in the GoSort web interface")
             print(f"    Device Identity: {config['sorter_id']}")
@@ -323,7 +326,8 @@ def main():
                 config['ip_address'] = None
                 config['sorter_id'] = None
                 save_config(config)
-                restart_program()
+                print("\n✅ All configuration cleared. Please restart the application.")
+                return
             elif key == 'q':
                 print("\n❌ Registration cancelled. Exiting...")
                 return
@@ -334,24 +338,7 @@ def main():
         if not first_request:
             print(".", end="", flush=True)
 
-    # Start heartbeat thread
-    def heartbeat_loop():
-        nonlocal auth_token
-        device_identity = config['sorter_id']
-        while True:
-            if not send_heartbeat(ip_address, auth_token, device_identity):
-                # Request registration again if heartbeat fails
-                registered, new_token = request_registration(ip_address, device_identity)
-                if registered:
-                    auth_token = new_token
-                else:
-                    print("\n❌ Device registration lost or waiting for approval")
-                    print("   Please check the web interface...")
-                    time.sleep(5)  # Wait before retrying
-            time.sleep(1)
-    
-    heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
-    heartbeat_thread.start()
+    # Ready to connect to Arduino
     
     mega_ports = list_arduino_ports()
     
@@ -382,108 +369,95 @@ def main():
     
     print("\n✅ Connected to Arduino Mega 2560")
     
-    maintenance_active = False
-
     def print_menu():
-        if not maintenance_active and not is_maintenance_mode():
-            print("\nTrash Selection Menu:")
-            print("1. Non Bio")
-            print("2. Bio")
-            print("3. Recyclable")
-            print("r. Reconfigure IP")
-            print("i. Reconfigure Identity")
-            print("c. Clear All Configuration")
-            print("q. Quit")
+        print("\nTrash Selection Menu:")
+        print("1. Non Bio")
+        print("2. Bio")
+        print("3. Recyclable")
+        print("r. Reconfigure IP")
+        print("i. Reconfigure Identity")
+        print("c. Clear All Configuration")
+        print("q. Quit")
 
     print_menu()
+    last_maintenance_status = False
+    check_interval = 1  # Check maintenance mode every second
+
+    last_heartbeat = 0
+    heartbeat_interval = 10  # Send heartbeat every 10 seconds
 
     while True:
-        # Check for maintenance commands first
-        maintenance_command = check_maintenance_command()
-        if maintenance_command:
-            if maintenance_command == 'maintenance_start':
-                print("\n🔧 Entering maintenance mode...")
-                maintenance_active = True
-                ser.write("maintmode\n".encode())
-                time.sleep(0.1)
-                while ser.in_waiting:
-                    response = ser.readline().decode().strip()
-                    if response:
-                        print(f"🟢 Arduino Response: {response}")
-                continue
-            elif maintenance_command == 'maintenance_end':
-                print("\n✅ Exiting maintenance mode...")
-                maintenance_active = False
-                ser.write("maintend\n".encode())
-                time.sleep(0.1)
-                while ser.in_waiting:
-                    response = ser.readline().decode().strip()
-                    if response:
-                        print(f"🟢 Arduino Response: {response}")
-                print_menu()
-                continue
-            elif maintenance_command == 'maintenance_keep':
-                # Just a keepalive signal, no action needed
-                continue
-            elif maintenance_command in ['bio', 'nbio', 'recyc', 'sweep1', 'sweep2', 'unclog'] and (maintenance_active or is_maintenance_mode()):
-                print(f"\n🔧 Maintenance: Executing {maintenance_command}...")
-                ser.write(f"{maintenance_command}\n".encode())
-                time.sleep(0.1)
-                while ser.in_waiting:
-                    response = ser.readline().decode().strip()
-                    if response:
-                        print(f"🟢 Arduino (Maintenance): {response}")
-                continue
+        # Send heartbeat periodically to keep device online
+        current_time = time.time()
+        if current_time - last_heartbeat >= heartbeat_interval:
+            try:
+                # Send heartbeat to update last_active
+                requests.post(
+                    f"http://{ip_address}/GoSort_Web/gs_DB/verify_sorter.php",
+                    json={'identity': config['sorter_id']},
+                    headers={'Content-Type': 'application/json'}
+                )
+                last_heartbeat = current_time
+            except Exception as e:
+                print(f"\n⚠️ Heartbeat error: {e}")
 
-        # If in maintenance mode, skip normal operation
-        if maintenance_active or is_maintenance_mode():
-            time.sleep(0.1)  # Short sleep to prevent CPU hogging
-            continue
-
-        # Non-blocking input check using msvcrt
-        if msvcrt.kbhit():
-            key = msvcrt.getch().decode()
+        # Check maintenance mode periodically
+        current_maintenance = check_maintenance_mode(ip_address, config['sorter_id'])
         
-        # Check for maintenance commands first
-        maintenance_command = check_maintenance_command()
-        if maintenance_command:
-            if maintenance_command == 'maintenance_start':
-                print("\n🔧 Entering maintenance mode...")
-                maintenance_active = True
-                ser.write("maintmode\n".encode())
-                time.sleep(0.1)
-                while ser.in_waiting:
-                    response = ser.readline().decode().strip()
-                    if response:
-                        print(f"🟢 Arduino Response: {response}")
-                continue
-            elif maintenance_command == 'maintenance_end':
-                print("\n✅ Exiting maintenance mode...")
-                maintenance_active = False
-                ser.write("maintend\n".encode())
-                time.sleep(0.1)
-                while ser.in_waiting:
-                    response = ser.readline().decode().strip()
-                    if response:
-                        print(f"🟢 Arduino Response: {response}")
+        # If maintenance status changed, notify user
+        if current_maintenance != last_maintenance_status:
+            if current_maintenance:
+                print("\n🔧 Entering maintenance mode - Controls disabled")
+                print("Listening for maintenance commands...")
+            else:
+                print("\n✅ Exiting maintenance mode - Controls enabled")
                 print_menu()
-                continue
-            elif maintenance_command == 'maintenance_keep':
-                # Just a keepalive signal, no action needed
-                continue
-            elif maintenance_command in ['bio', 'nbio', 'recyc', 'sweep1', 'sweep2', 'unclog'] and (maintenance_active or is_maintenance_mode()):
-                print(f"\n🔧 Maintenance: Executing {maintenance_command}...")
-                ser.write(f"{maintenance_command}\n".encode())
-                time.sleep(0.1)
-                while ser.in_waiting:
-                    response = ser.readline().decode().strip()
-                    if response:
-                        print(f"🟢 Arduino (Maintenance): {response}")
-                continue
+            last_maintenance_status = current_maintenance
 
-        # If in maintenance mode, skip normal operation
-        if maintenance_active or is_maintenance_mode():
-            time.sleep(0.1)  # Short sleep to prevent CPU hogging
+        # If in maintenance mode, check for and execute maintenance commands
+        if current_maintenance:
+            try:
+                response = requests.post(
+                    f"http://{ip_address}/GoSort_Web/gs_DB/check_maintenance_commands.php",
+                    json={'device_identity': config['sorter_id']},
+                    headers={'Content-Type': 'application/json'}
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('success') and data.get('command'):
+                        command = data['command']
+                        print(f"\n📡 Executing maintenance command: {command}")
+                        ser.write(f"{command}\n".encode())
+                        time.sleep(0.1)
+                        
+                        while ser.in_waiting:
+                            response = ser.readline().decode().strip()
+                            if response:
+                                print(f"🟢 Arduino Response: {response}")
+                        
+                        # Record the sorting operation if it's a sorting command
+                        if command in ['bio', 'nbio', 'recyc']:
+                            try:
+                                requests.post(
+                                    f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
+                                    json={
+                                        'device_identity': config['sorter_id'],
+                                        'trash_type': command,
+                                        'is_maintenance': True
+                                    }
+                                )
+                            except Exception as e:
+                                print(f"\n⚠️ Error recording sorting: {e}")
+                        
+                        # Mark command as executed
+                        requests.post(
+                            f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
+                            json={'device_identity': config['sorter_id'], 'command': command}
+                        )
+            except Exception as e:
+                print(f"\n❌ Error checking maintenance commands: {e}")
+            
+            time.sleep(check_interval)
             continue
 
         # Process normal operation input only if available and not in maintenance mode
@@ -491,64 +465,26 @@ def main():
             choice = msvcrt.getch().decode().lower()
             
             if choice == 'q':
-                # Set device as offline before quitting
-                try:
-                    url = f"http://{ip_address}/GoSort_Web/gs_DB/set_device_offline.php"
-                    requests.post(url, json={
-                        'token': auth_token,
-                        'identity': config['sorter_id']
-                    })
-                except:
-                    pass  # Don't prevent shutdown if request fails
                 break
             elif choice == 'r':
-                # Set device as offline before resetting
-                try:
-                    url = f"http://{ip_address}/GoSort_Web/gs_DB/set_device_offline.php"
-                    requests.post(url, json={
-                        'token': auth_token,
-                        'identity': config['sorter_id']
-                    })
-                except:
-                    pass
                 config = load_config()
                 config['ip_address'] = None
                 save_config(config)
                 print("\nIP configuration reset. Please restart the application.")
                 break
             elif choice == 'i':
-                # Set device as offline before reconfiguring
-                try:
-                    url = f"http://{ip_address}/GoSort_Web/gs_DB/set_device_offline.php"
-                    requests.post(url, json={
-                        'token': auth_token,
-                        'identity': config['sorter_id']
-                    })
-                except:
-                    pass
                 config = load_config()
                 print("\nReconfiguring Sorter Identity")
                 sorter_id = input("Enter new Sorter Identity (e.g., Sorter1): ")
                 config['sorter_id'] = sorter_id
                 save_config(config)
-                print("\nSorter Identity updated. Restarting...")
-                restart_program()
+                print("\nSorter Identity updated. Please restart the application.")
+                break
             elif choice == 'c':
-                # Set device as offline before clearing config
-                try:
-                    url = f"http://{ip_address}/GoSort_Web/gs_DB/set_device_offline.php"
-                    requests.post(url, json={
-                        'token': auth_token,
-                        'identity': config['sorter_id']
-                    })
-                except:
-                    pass
                 # Clear all configuration
                 print("\n⚠️ Clearing all configuration...")
                 if os.path.exists('gosort_config.json'):
                     os.remove('gosort_config.json')
-                if os.path.exists('python_auth_token.txt'):
-                    os.remove('python_auth_token.txt')
                 print("✅ All configuration cleared. Please restart the application.")
                 break
             elif choice in ['1', '2', '3']:
@@ -564,11 +500,26 @@ def main():
                     response = ser.readline().decode().strip()
                     if response:
                         print(f"🟢 Arduino Response: {response}")
+                
+                # Record the sorting operation
+                try:
+                    requests.post(
+                        f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
+                        json={
+                            'device_identity': config['sorter_id'],
+                            'trash_type': command,
+                            'is_maintenance': False
+                        }
+                    )
+                except Exception as e:
+                    print(f"\n⚠️ Error recording sorting: {e}")
+                
                 print_menu()
             elif choice not in ['\r', '\n']:  # Ignore enter key presses
                 print("\nInvalid choice. Please choose 1, 2, 3, r for IP config, i for Identity config, or q to quit")
         
-
+        # Add a small delay to prevent the loop from running too fast
+        time.sleep(0.1)
     
     ser.close()
     print("🔌 Connection closed")

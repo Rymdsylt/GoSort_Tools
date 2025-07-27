@@ -11,6 +11,8 @@ import os
 import socket
 import concurrent.futures
 import threading
+import sys
+import msvcrt
 
 def is_maintenance_mode():
     return os.path.exists('python_maintenance_mode.txt')
@@ -277,69 +279,162 @@ def check_maintenance_command():
         return command
     return None
 
-def get_or_create_auth_token(ip_address):
-    token_file = 'python_auth_token.txt'
-    if os.path.exists(token_file):
-        with open(token_file, 'r') as f:
-            return f.read().strip()
-    
+# Function to check server connection - returns True if server is reachable
+def check_server_connection(ip_address):
     try:
-        url = f"http://{ip_address}/GoSort_Web/gs_DB/connection_status.php"
-        response = requests.post(url, data={'token': ''})
-        if os.path.exists(token_file):
-            with open(token_file, 'r') as f:
-                return f.read().strip()
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/verify_sorter.php"
+        response = requests.post(url, json={'identity': ''})
+        return response.status_code == 200
     except:
-        pass
-    return None
+        return False
 
-def send_heartbeat(ip_address, auth_token, device_identity):
+def check_maintenance_mode(ip_address, device_identity):
     try:
-        url = f"http://{ip_address}/GoSort_Web/gs_DB/connection_status.php"
-        response = requests.post(url, json={
-            'token': auth_token,
-            'identity': device_identity
-        })
-        if response.status_code != 200:
-            print(f"❌ Error sending heartbeat: {response.status_code}")
-        return True
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/check_maintenance.php"
+        response = requests.post(
+            url,
+            json={'identity': device_identity},
+            headers={'Content-Type': 'application/json'}
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('success'):
+                return data.get('maintenance_mode') == 1
+        return False
+    except Exception as e:
+        print(f"\n❌ Error checking maintenance mode: {e}")
+        return False
+
+def send_heartbeat(ip_address, device_identity):
+    try:
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/verify_sorter.php"
+        response = requests.post(url, json={'identity': device_identity})
+        return response.status_code == 200
     except requests.exceptions.RequestException as e:
         print(f"❌ Error sending heartbeat: {e}")
         return False
 
+def add_to_waiting_devices(ip_address, device_identity):
+    try:
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/add_waiting_device.php"
+        response = requests.post(url, json={
+            'identity': device_identity
+        })
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('success'):
+                return True
+            print(f"\n❌ Server error: {data.get('message', 'Unknown error')}")
+        return False
+    except Exception as e:
+        print(f"\n❌ Error adding device to waiting list: {e}")
+        return False
+
 def request_registration(ip_address, identity):
     try:
-        url = f"http://{ip_address}/GoSort_Web/gs_DB/request_registration.php"
+        # First check if device is in sorters table
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/verify_sorter.php"
         response = requests.post(
             url,
             json={'identity': identity},
             headers={'Content-Type': 'application/json'}
         )
         if response.status_code == 200:
-            return True
-        return False
+            data = response.json()
+            if data.get('success'):
+                if data.get('registered'):
+                    return True, None
+                else:
+                    # Add to waiting devices if not already registered
+                    if add_to_waiting_devices(ip_address, identity):
+                        print("\n✅ Added to waiting devices list")
+                    return False, None
+            print(f"\n❌ Server error: {data.get('message', 'Unknown error')}")
+        return False, None
     except Exception as e:
-        print(f"❌ Error requesting registration: {e}")
-        return False
+        print(f"\n❌ Error requesting registration: {e}")
+        return False, None
+
+def restart_program():
+    print("\n🔄 Restarting application...")
+    python = sys.executable
+    os.execl(python, python, *sys.argv)
 
 def main():
-    # Get IP address first
+    # First get identity configuration
+    config = load_config()
+    if config.get('sorter_id') is None:
+        print("\nFirst time setup - Sorter Identity Configuration")
+        sorter_id = input("Enter Sorter Identity (e.g., Sorter1): ")
+        config['sorter_id'] = sorter_id
+        save_config(config)
+    
+    # Then get IP address
     ip_address = get_ip_address()
     print(f"\nUsing GoSort server at: {ip_address}")
-
-    config = load_config()
-    sorter_id = config.get('sorter_id')
     
-    # Get authentication token
-    auth_token = get_or_create_auth_token(ip_address)
-    if not auth_token:
-        print("❌ Failed to get authentication token")
+    sorter_id = config.get('sorter_id')
+    print(f"Using Sorter Identity: {sorter_id}")
+    
+    print("\nVerifying server connection...")
+    if not check_server_connection(ip_address):
+        print("❌ Failed to connect to the server")
         return
 
-    # Request registration if needed
-    if not request_registration(ip_address, sorter_id):
-        print("❌ Failed to register device")
-        return
+    print("\nRequesting device registration with the server...")
+    registered = False
+    first_request = True
+
+    def print_waiting_menu():
+        print("\n\nOptions while waiting:")
+        print("r - Reconfigure Identity")
+        print("c - Clear All Configuration")
+        print("q - Quit")
+        print("\nPress any other key to check registration status...")
+
+    while not registered:
+        registered, _ = request_registration(ip_address, sorter_id)
+        
+        if registered:
+            print("\n✅ Device registration confirmed!")
+            break
+        elif first_request:
+            print("\n⏳ Waiting for admin approval in the GoSort web interface")
+            print(f"    Device Identity: {sorter_id}")
+            print("    Please approve this device in the web interface...")
+            print_waiting_menu()
+            first_request = False
+        
+        if msvcrt.kbhit():
+            key = msvcrt.getch().decode().lower()
+            if key == 'r':
+                print("\nReconfiguring Sorter Identity")
+                sorter_id = input("Enter new Sorter Identity (e.g., Sorter1): ")
+                config['sorter_id'] = sorter_id
+                save_config(config)
+                print("\n⏳ Trying with new identity:", sorter_id)
+                first_request = True  # Reset to show the waiting message again
+                continue
+            elif key == 'c':
+                print("\n⚠️ Clearing all configuration...")
+                if os.path.exists('gosort_config.json'):
+                    os.remove('gosort_config.json')
+                print("✅ All configuration cleared.")
+                print("\n❌ Exiting...")
+                return
+            elif key == 'q':
+                print("\n❌ Registration cancelled. Exiting...")
+                return
+            else:
+                print("\nChecking registration status...", end="", flush=True)
+        
+        time.sleep(2)  # Check every 2 seconds
+        if not first_request:
+            print(".", end="", flush=True)
+
+    # Set up last heartbeat time
+    last_heartbeat = 0
+    heartbeat_interval = 5  # Send heartbeat every 5 seconds
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -409,67 +504,157 @@ def main():
         frame = stream.read()
         frame_count += 1
 
-       
+        # Handle heartbeat
+        current_time = time.time()
+        if current_time - last_heartbeat >= heartbeat_interval:
+            if send_heartbeat(ip_address, sorter_id):
+                last_heartbeat = current_time
+            else:
+                print("\n⚠️ Failed to send heartbeat")
+
+        # Handle maintenance mode
+        in_maintenance = check_maintenance_mode(ip_address, sorter_id)
+        if in_maintenance:
+            # Add red maintenance mode text
+            cv2.putText(frame, "MAINTENANCE MODE - Detection Paused", (10, 110), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            # Check for and execute maintenance commands
+            try:
+                response = requests.post(
+                    f"http://{ip_address}/GoSort_Web/gs_DB/check_maintenance_commands.php",
+                    json={'device_identity': sorter_id},
+                    headers={'Content-Type': 'application/json'}
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('success') and data.get('command'):
+                        command = data['command']
+                        print(f"\n📡 Executing maintenance command: {command}")
+                        
+                        # Send command to Arduino if available
+                        if command_handler is not None:
+                            if command_handler.command_queue.empty():
+                                cmd = ArduinoCommand(f"{command}\n")
+                                command_handler.command_queue.put(cmd)
+                                
+                                # Wait for this command to complete
+                                while not cmd.done and command_handler.running:
+                                    time.sleep(0.1)
+                                print("✅ Maintenance command executed")
+                                
+                                # Record the sorting operation if it's a sorting command
+                                if command in ['bio', 'nbio', 'recyc']:
+                                    try:
+                                        requests.post(
+                                            f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
+                                            json={
+                                                'device_identity': sorter_id,
+                                                'trash_type': command,
+                                                'is_maintenance': True
+                                            }
+                                        )
+                                    except Exception as e:
+                                        print(f"\n⚠️ Error recording sorting: {e}")
+                                
+                                # Mark command as executed
+                                requests.post(
+                                    f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
+                                    json={'device_identity': sorter_id, 'command': command}
+                                )
+            except Exception as e:
+                print(f"\n❌ Error checking maintenance commands: {e}")
+            
+            # Skip YOLOv8 inference during maintenance
+            results = []
+        else:
+            # Only run YOLOv8 when not in maintenance mode
+            with torch.cuda.amp.autocast(), torch.inference_mode(): 
+                results = model(frame, stream=True)  
+
+        # Update FPS counter
         current_time = time.time()
         if current_time - fps_time >= 1.0:
             fps = frame_count
             frame_count = 0
             fps_time = current_time
 
-              
-        with torch.cuda.amp.autocast(), torch.inference_mode(): 
-            results = model(frame, stream=True)  
+        if not in_maintenance:
+            for result in results:
+                boxes = result.boxes.cpu().numpy()
+                for box in boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].astype(int)
+                    conf = box.conf[0]
+                    class_id = int(box.cls[0])
+                    class_name = model.names[class_id]
 
-        for result in results:
-            boxes = result.boxes.cpu().numpy()
-            for box in boxes:
-                x1, y1, x2, y2 = box.xyxy[0].astype(int)
-                conf = box.conf[0]
-                class_id = int(box.cls[0])
-                class_name = model.names[class_id]
+                    # Draw bounding box and label (properly indented inside the box loop)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    label = f"{class_name} {conf:.2f}"
+                    cv2.putText(frame, label, (x1, y1 - 10),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-           
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                label = f"{class_name} {conf:.2f}"
-                cv2.putText(frame, label, (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                
-     
-                if command_handler is not None and conf > 0.78:
-                    trash_type = ''
-                    if class_name.lower() in ['plastic', 'metal', 'glass', 'botol_kaca', 'botol_kaleng']:
-                        trash_type = 'recyc'
-                    elif class_name.lower() in ['paper', 'food', 'organic']:
-                        trash_type = 'bio'
-                    else:
-                        trash_type = 'nbio'
-                        
-                    try:
-                        url = f"http://{ip_address}/GoSort/gs_DB/trash_detected.php"
-                        response = requests.get(url, params={'type': trash_type})
-                        if response.status_code == 200:
-                            print(f"✅ Detection recorded: {class_name} ({conf:.2f})")
+                    # Process detections with high confidence
+                    if conf > 0.78:
+                        # Determine trash type
+                        trash_type = ''
+                        if class_name.lower() in ['plastic', 'metal', 'glass', 'botol_kaca', 'botol_kaleng']:
+                            trash_type = 'recyc'
+                        elif class_name.lower() in ['paper', 'food', 'organic']:
+                            trash_type = 'bio'
                         else:
-                            print(f"❌ Failed to record detection: {response.text}")
-                            print(f"Status code: {response.status_code}")
-                    except requests.exceptions.RequestException as e:
-                        print(f"❌ Error connecting to server: {e}")
+                            trash_type = 'nbio'
                         
-                    # Only send command if the command queue is empty
-                    if command_handler.command_queue.empty():
-                        # Send the mapped trash_type to Arduino
-                        command = f"{trash_type}\n"
-                        command_handler.send_command(command)
-                        
-                        # Add delay to match Arduino servo movement time (1 second)
-                        time.sleep(1.0)
+                        try:
+                            print(f"✅ Detection: {class_name} ({conf:.2f})")
+                            
+                            # Record sorting operation
+                            url = f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php"
+                            response = requests.post(url, json={
+                                'device_identity': sorter_id,
+                                'trash_type': trash_type,
+                                'is_maintenance': False
+                            })
+                            if response.status_code == 200:
+                                print(f"✅ Sorting operation recorded")
+                            else:
+                                print(f"❌ Failed to record sorting operation")
+
+                            # Send command to Arduino if available
+                            if command_handler is not None:
+                                if command_handler.command_queue.empty():
+                                    print("⏱️ Starting sorting sequence...")
+                                    command = f"{trash_type}\n"
+                                    cmd = ArduinoCommand(command)
+                                    command_handler.command_queue.put(cmd)
+                                    
+                                    # Wait for this command to complete
+                                    while not cmd.done and command_handler.running:
+                                        time.sleep(0.1)  # Check every 100ms
+                                    
+                                    print("✅ Sorting mechanism complete - resuming detection")
+                                else:
+                                    print("⏳ Waiting for previous sorting operation to complete...")
+                                    
+                        except Exception as e:
+                            print(f"❌ Error processing detection: {e}")
         ui_panel = np.zeros((100, frame.shape[1], 3), dtype=np.uint8)
         
+        # Change IP button
         cv2.rectangle(ui_panel, (10, 10), (150, 40), (0, 255, 0), -1)
         cv2.putText(ui_panel, "Change IP", (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
         
-        cv2.rectangle(ui_panel, (170, 10), (310, 40), (0, 0, 255), -1)
-        cv2.putText(ui_panel, "Exit", (215, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        # Change Identity button
+        cv2.rectangle(ui_panel, (170, 10), (310, 40), (0, 255, 0), -1)
+        cv2.putText(ui_panel, "Change ID", (190, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+        
+        # Reconfigure All button
+        cv2.rectangle(ui_panel, (330, 10), (470, 40), (0, 255, 0), -1)
+        cv2.putText(ui_panel, "Reconfig All", (340, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+        
+        # Exit button
+        cv2.rectangle(ui_panel, (490, 10), (630, 40), (0, 0, 255), -1)
+        cv2.putText(ui_panel, "Exit", (535, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         cv2.putText(frame, f"FPS: {fps}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         device_text = f"GPU: {device_name}" if torch.cuda.is_available() else f"CPU: {device_name}"
@@ -494,7 +679,30 @@ def main():
                         nonlocal ip_address
                         ip_address = get_ip_address()
                         print(f"\nUpdated GoSort server address to: {ip_address}")
-                    elif 170 <= x <= 310:  # Exit button
+                    elif 170 <= x <= 310:  # Change Identity button
+                        print("\nReconfiguring Sorter Identity")
+                        sorter_id = input("Enter new Sorter Identity (e.g., Sorter1): ")
+                        config = load_config()
+                        config['sorter_id'] = sorter_id
+                        save_config(config)
+                        print("\nSorter Identity updated. Please restart the application.")
+                        cv2.destroyAllWindows()
+                        stream.stop()
+                        if command_handler:
+                            command_handler.stop()
+                        exit()
+                    elif 330 <= x <= 470:  # Reconfigure All button
+                        print("\nReconfiguring All Settings")
+                        # Clear all configuration
+                        config = {}
+                        save_config(config)
+                        print("\nAll configuration cleared. Please restart the application.")
+                        cv2.destroyAllWindows()
+                        stream.stop()
+                        if command_handler:
+                            command_handler.stop()
+                        exit()
+                    elif 490 <= x <= 630:  # Exit button
                         cv2.destroyAllWindows()
                         stream.stop()
                         if command_handler:
