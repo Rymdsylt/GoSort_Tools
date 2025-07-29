@@ -108,13 +108,6 @@ def get_ip_address():
     config = load_config()
     ip = config.get('ip_address')
     
-    # Get sorter identity if not set
-    if config.get('sorter_id') is None:
-        print("\nFirst time setup - Sorter Identity Configuration")
-        sorter_id = input("Enter Sorter Identity (e.g., Sorter1): ")
-        config['sorter_id'] = sorter_id
-        save_config(config)
-    
     while True:
         if not ip:
             gosort_ips, available_ips = scan_network()
@@ -257,20 +250,75 @@ def restart_program():
     python = sys.executable
     os.execl(python, python, *sys.argv)
 
+def is_identity_duplicate(ip_address, identity):
+    try:
+        print("Checking for identical identity...")
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/check_duplicate_identity.php"
+        response = requests.post(url, json={'identity': identity}, headers={'Content-Type': 'application/json'})
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('success'):
+                status = data.get('status')
+                if status == 'waiting':
+                    return True, "waiting"
+                elif status == 'registered':
+                    return True, "registered"
+        return False, None
+    except Exception as e:
+        print(f"Error checking duplicate identity: {e}")
+        return False, None
+
+def remove_from_waiting_devices(ip_address, device_identity):
+    try:
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/remove_waiting_device.php"
+        response = requests.post(url, json={'identity': device_identity}, headers={'Content-Type': 'application/json'})
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('success'):
+                print(f"\n✅ Removed {device_identity} from waiting devices list")
+                return True
+        return False
+    except Exception as e:
+        print(f"\n❌ Error removing from waiting devices: {e}")
+        return False
+
 def main():
-    # First get IP address
     config = load_config()
+    # First get IP address
     ip_address = get_ip_address()
     print(f"\nUsing GoSort server at: {ip_address}")
-    
+
     # Then get or set identity
     config = load_config()
     if config.get('sorter_id') is None:
         print("\nFirst time setup - Sorter Identity Configuration")
-        sorter_id = input("Enter Sorter Identity (e.g., Sorter1): ")
-        config['sorter_id'] = sorter_id
-        save_config(config)
+        while True:
+            sorter_id = input("Enter Sorter Identity (e.g., Sorter1): ")
+            is_duplicate, status = is_identity_duplicate(ip_address, sorter_id)
+            if is_duplicate:
+                if status == "waiting":
+                    print("Identical Identity Found in waiting list, reenter")
+                elif status == "registered":
+                    print("Identical Identity Found in registered devices, reenter")
+                continue
+            config['sorter_id'] = sorter_id
+            save_config(config)
+            break
     
+    # Fetch mapping from backend
+    mapping_url = f"http://{ip_address}/GoSort_Web/gs_DB/save_sorter_mapping.php?device_identity={config['sorter_id']}"
+    try:
+        resp = requests.get(mapping_url)
+        mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
+    except Exception as e:
+        print(f"Warning: Could not fetch mapping, using default. {e}")
+        mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
+    # Reverse mapping: trash type -> servo command
+    trash_to_cmd = {v: k for k, v in mapping.items()}
+    # For menu display: get the order and labels
+    menu_order = [('zdeg', mapping['zdeg']), ('ndeg', mapping['ndeg']), ('odeg', mapping['odeg'])]
+    trash_labels = {'bio': 'Biodegradable', 'nbio': 'Non-Biodegradable', 'recyc': 'Recyclable'}
+
     print("\nRequesting device registration with the server...")
     dots_thread = None
 
@@ -322,6 +370,8 @@ def main():
                 continue
             elif key == 'a':
                 print("\n⚙️ Reconfiguring All Settings...")
+                # Remove from waiting devices before clearing config
+                remove_from_waiting_devices(ip_address, config['sorter_id'])
                 # Clear IP and identity
                 config['ip_address'] = None
                 config['sorter_id'] = None
@@ -330,6 +380,8 @@ def main():
                 return
             elif key == 'q':
                 print("\n❌ Registration cancelled. Exiting...")
+                # Remove from waiting devices before exiting
+                remove_from_waiting_devices(ip_address, config['sorter_id'])
                 return
             else:
                 print("\nChecking registration status...", end="", flush=True)
@@ -371,9 +423,9 @@ def main():
     
     def print_menu():
         print("\nTrash Selection Menu:")
-        print("1. Non Bio")
-        print("2. Bio")
-        print("3. Recyclable")
+        for idx, (deg, ttype) in enumerate(menu_order, 1):
+            label = trash_labels.get(ttype, ttype)
+            print(f"{idx}. {label}")
         print("r. Reconfigure IP")
         print("i. Reconfigure Identity")
         print("c. Clear All Configuration")
@@ -400,6 +452,8 @@ def main():
                 last_heartbeat = current_time
             except Exception as e:
                 print(f"\n⚠️ Heartbeat error: {e}")
+                # Remove from waiting devices if heartbeat fails
+                remove_from_waiting_devices(ip_address, config['sorter_id'])
 
         # Check maintenance mode periodically
         current_maintenance = check_maintenance_mode(ip_address, config['sorter_id'])
@@ -411,6 +465,15 @@ def main():
                 print("Listening for maintenance commands...")
             else:
                 print("\n✅ Exiting maintenance mode - Controls enabled")
+                # Re-fetch mapping after maintenance mode
+                try:
+                    resp = requests.get(mapping_url)
+                    mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
+                except Exception as e:
+                    print(f"Warning: Could not fetch mapping, using default. {e}")
+                    mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
+                trash_to_cmd = {v: k for k, v in mapping.items()}
+                menu_order = [('zdeg', mapping['zdeg']), ('ndeg', mapping['ndeg']), ('odeg', mapping['odeg'])]
                 print_menu()
             last_maintenance_status = current_maintenance
 
@@ -436,24 +499,44 @@ def main():
                                 print(f"🟢 Arduino Response: {response}")
                         
                         # Record the sorting operation if it's a sorting command
-                        if command in ['bio', 'nbio', 'recyc']:
-                            try:
-                                requests.post(
-                                    f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
-                                    json={
-                                        'device_identity': config['sorter_id'],
-                                        'trash_type': command,
-                                        'is_maintenance': True
-                                    }
-                                )
-                            except Exception as e:
-                                print(f"\n⚠️ Error recording sorting: {e}")
+                        if command in ['ndeg', 'zdeg', 'odeg']:
+                            # Find the logical trash type for this command
+                            trash_type = None
+                            for ttype, cmd in trash_to_cmd.items():
+                                if cmd == command:
+                                    trash_type = ttype
+                                    break
+                            if trash_type:
+                                try:
+                                    requests.post(
+                                        f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
+                                        json={
+                                            'device_identity': config['sorter_id'],
+                                            'trash_type': trash_type,
+                                            'is_maintenance': True
+                                        }
+                                    )
+                                except Exception as e:
+                                    print(f"\n⚠️ Error recording sorting: {e}")
                         
                         # Mark command as executed
                         requests.post(
                             f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
                             json={'device_identity': config['sorter_id'], 'command': command}
                         )
+                        if command == 'shutdown':
+                            print("\n⚠️ Shutdown command received. Shutting down computer...")
+                            # Mark command as executed before shutdown
+                            try:
+                                requests.post(
+                                    f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
+                                    json={'device_identity': config['sorter_id'], 'command': command}
+                                )
+                            except Exception as e:
+                                print(f"\n⚠️ Error marking shutdown command as executed: {e}")
+                            os.system('shutdown /s /t 1 /f')
+                            time.sleep(5)
+                            break
             except Exception as e:
                 print(f"\n❌ Error checking maintenance commands: {e}")
             
@@ -488,33 +571,34 @@ def main():
                 print("✅ All configuration cleared. Please restart the application.")
                 break
             elif choice in ['1', '2', '3']:
-                command = {
-                    '1': 'nbio',
-                    '2': 'bio',
-                    '3': 'recyc'
-                }[choice]
-                ser.write(f"{command}\n".encode())
-                print(f"\n🔄 Moving to {command.upper()}...")
-                time.sleep(0.1)
-                while ser.in_waiting:
-                    response = ser.readline().decode().strip()
-                    if response:
-                        print(f"🟢 Arduino Response: {response}")
-                
-                # Record the sorting operation
-                try:
-                    requests.post(
-                        f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
-                        json={
-                            'device_identity': config['sorter_id'],
-                            'trash_type': command,
-                            'is_maintenance': False
-                        }
-                    )
-                except Exception as e:
-                    print(f"\n⚠️ Error recording sorting: {e}")
-                
-                print_menu()
+                 idx = int(choice) - 1
+                 if idx < 0 or idx >= len(menu_order):
+                     print("Invalid choice.")
+                     continue
+                 trash_type = menu_order[idx][1]
+                 command = trash_to_cmd.get(trash_type, 'zdeg')
+                 ser.write(f"{command}\n".encode())
+                 print(f"\n🔄 Moving to {command.upper()}...")
+                 time.sleep(0.1)
+                 while ser.in_waiting:
+                     response = ser.readline().decode().strip()
+                     if response:
+                         print(f"🟢 Arduino Response: {response}")
+                 
+                 # Record the sorting operation
+                 try:
+                     requests.post(
+                         f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
+                         json={
+                             'device_identity': config['sorter_id'],
+                             'trash_type': trash_type,
+                             'is_maintenance': False
+                         }
+                     )
+                 except Exception as e:
+                     print(f"\n⚠️ Error recording sorting: {e}")
+                 
+                 print_menu()
             elif choice not in ['\r', '\n']:  # Ignore enter key presses
                 print("\nInvalid choice. Please choose 1, 2, 3, r for IP config, i for Identity config, or q to quit")
         
