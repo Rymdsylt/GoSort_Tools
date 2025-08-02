@@ -419,6 +419,27 @@ def main():
     
     print("\n✅ Connected to Arduino Mega 2560")
     
+    # Track Arduino connection status
+    arduino_connected = True
+    
+    def check_arduino_connection():
+        """Check if Arduino is still connected"""
+        nonlocal arduino_connected
+        try:
+            # Try to get port info to check if Arduino is still connected
+            if not ser.is_open:
+                arduino_connected = False
+                return False
+            
+            # Try a simple write operation to test connection
+            ser.write(b'ping\n')
+            time.sleep(0.1)
+            return True
+        except (serial.SerialException, OSError, Exception) as e:
+            print(f"\n❌ Arduino connection lost: {e}")
+            arduino_connected = False
+            return False
+
     def print_menu():
         print("\nTrash Selection Menu:")
         for idx, (deg, ttype) in enumerate(menu_order, 1):
@@ -440,18 +461,26 @@ def main():
         # Send heartbeat periodically to keep device online
         current_time = time.time()
         if current_time - last_heartbeat >= heartbeat_interval:
-            try:
-                # Send heartbeat to update last_active
-                requests.post(
-                    f"http://{ip_address}/GoSort_Web/gs_DB/verify_sorter.php",
-                    json={'identity': config['sorter_id']},
-                    headers={'Content-Type': 'application/json'}
-                )
-                last_heartbeat = current_time
-            except Exception as e:
-                print(f"\n⚠️ Heartbeat error: {e}")
-                # Remove from waiting devices if heartbeat fails
+            # Only send heartbeat if Arduino is still connected
+            if arduino_connected and check_arduino_connection():
+                try:
+                    # Send heartbeat to update last_active
+                    requests.post(
+                        f"http://{ip_address}/GoSort_Web/gs_DB/verify_sorter.php",
+                        json={'identity': config['sorter_id']},
+                        headers={'Content-Type': 'application/json'}
+                    )
+                    last_heartbeat = current_time
+                except Exception as e:
+                    print(f"\n⚠️ Heartbeat error: {e}")
+                    # Remove from waiting devices if heartbeat fails
+                    remove_from_waiting_devices(ip_address, config['sorter_id'])
+            else:
+                # Arduino disconnected, stop sending heartbeats
+                print("\n⚠️ Arduino disconnected - stopping heartbeats")
+                # Remove from waiting devices since Arduino is disconnected
                 remove_from_waiting_devices(ip_address, config['sorter_id'])
+                break
 
         # Check maintenance mode periodically
         current_maintenance = check_maintenance_mode(ip_address, config['sorter_id'])
@@ -476,6 +505,12 @@ def main():
 
         # If in maintenance mode, check for and execute maintenance commands
         if current_maintenance:
+            # Check Arduino connection before processing maintenance commands
+            if not arduino_connected or not check_arduino_connection():
+                print("\n⚠️ Arduino disconnected - cannot execute maintenance commands")
+                time.sleep(check_interval)
+                continue
+                
             try:
                 response = requests.post(
                     f"http://{ip_address}/GoSort_Web/gs_DB/check_maintenance_commands.php",

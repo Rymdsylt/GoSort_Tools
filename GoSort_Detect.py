@@ -540,10 +540,35 @@ def main():
         
         # Create command handler after initialization
         command_handler = CommandHandler(arduino)
+        
+        # Track Arduino connection status
+        arduino_connected = True
+        
+        def check_arduino_connection():
+            """Check if Arduino is still connected"""
+            nonlocal arduino_connected
+            try:
+                # Try to get port info to check if Arduino is still connected
+                if not arduino.is_open:
+                    arduino_connected = False
+                    return False
+                
+                # Try a simple write operation to test connection
+                arduino.write(b'ping\n')
+                time.sleep(0.1)
+                return True
+            except (serial.SerialException, OSError, Exception) as e:
+                print(f"\n❌ Arduino connection lost: {e}")
+                arduino_connected = False
+                return False
     except Exception as e:
         print(f"Failed to connect to Arduino: {e}")
         arduino = None
         command_handler = None
+        arduino_connected = False
+        
+        def check_arduino_connection():
+            return False
 
     print("Searching for available cameras...")
 
@@ -585,12 +610,20 @@ def main():
         # Handle heartbeat
         current_time = time.time()
         if current_time - last_heartbeat >= heartbeat_interval:
-            if send_heartbeat(ip_address, sorter_id):
-                last_heartbeat = current_time
+            # Only send heartbeat if Arduino is still connected
+            if arduino_connected and check_arduino_connection():
+                if send_heartbeat(ip_address, sorter_id):
+                    last_heartbeat = current_time
+                else:
+                    print("\n⚠️ Failed to send heartbeat")
+                    # Remove from waiting devices if heartbeat fails
+                    remove_from_waiting_devices(ip_address, sorter_id)
             else:
-                print("\n⚠️ Failed to send heartbeat")
-                # Remove from waiting devices if heartbeat fails
+                # Arduino disconnected, stop sending heartbeats
+                print("\n⚠️ Arduino disconnected - stopping heartbeats")
+                # Remove from waiting devices since Arduino is disconnected
                 remove_from_waiting_devices(ip_address, sorter_id)
+                break
 
         # Check maintenance mode periodically
         current_maintenance = check_maintenance_mode(ip_address, sorter_id)
@@ -619,99 +652,105 @@ def main():
             cv2.putText(frame, "MAINTENANCE MODE - Detection Paused", (10, 110), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
-            try:
-                response = requests.post(
-                    f"http://{ip_address}/GoSort_Web/gs_DB/check_maintenance_commands.php",
-                    json={'device_identity': sorter_id},
-                    headers={'Content-Type': 'application/json'}
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get('success') and data.get('command'):
-                        command = data['command']
-                        print(f"\n📡 Received maintenance command from server: {command}")
-                        print(f"Current mapping: {mapping}")
-                        
-                        # Shutdown logic
-                        if command == 'shutdown':
-                            print("\n⚠️ Shutdown command received. Shutting down computer...")
-                            # Mark command as executed before shutdown
-                            try:
-                                requests.post(
-                                    f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
-                                    json={'device_identity': sorter_id, 'command': command}
-                                )
-                            except Exception as e:
-                                print(f"\n⚠️ Error marking shutdown command as executed: {e}")
-                            os.system('shutdown /s /t 1 /f')
-                            time.sleep(5)
-                            break
-                        
-                        # Send command to Arduino if available
-                        if command_handler is not None:
-                            if command_handler.command_queue.empty():
-                                # For maintenance commands that require maintenance mode, send maintmode first
-                                if command in ['unclog', 'sweep1', 'sweep2']:
-                                    print("Sending maintmode command to enable maintenance mode...")
-                                    command_handler.arduino.write("maintmode\n".encode())
-                                    time.sleep(0.5)  # Give Arduino time to process maintmode command
+            # Check Arduino connection before processing maintenance commands
+            if not arduino_connected or not check_arduino_connection():
+                print("\n⚠️ Arduino disconnected - cannot execute maintenance commands")
+                # Skip YOLOv8 inference during maintenance
+                results = []
+            else:
+                try:
+                    response = requests.post(
+                        f"http://{ip_address}/GoSort_Web/gs_DB/check_maintenance_commands.php",
+                        json={'device_identity': sorter_id},
+                        headers={'Content-Type': 'application/json'}
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get('success') and data.get('command'):
+                            command = data['command']
+                            print(f"\n📡 Received maintenance command from server: {command}")
+                            print(f"Current mapping: {mapping}")
+                            
+                            # Shutdown logic
+                            if command == 'shutdown':
+                                print("\n⚠️ Shutdown command received. Shutting down computer...")
+                                # Mark command as executed before shutdown
+                                try:
+                                    requests.post(
+                                        f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
+                                        json={'device_identity': sorter_id, 'command': command}
+                                    )
+                                except Exception as e:
+                                    print(f"\n⚠️ Error marking shutdown command as executed: {e}")
+                                os.system('shutdown /s /t 1 /f')
+                                time.sleep(5)
+                                break
+                            
+                            # Send command to Arduino if available
+                            if command_handler is not None:
+                                if command_handler.command_queue.empty():
+                                    # For maintenance commands that require maintenance mode, send maintmode first
+                                    if command in ['unclog', 'sweep1', 'sweep2']:
+                                        print("Sending maintmode command to enable maintenance mode...")
+                                        command_handler.arduino.write("maintmode\n".encode())
+                                        time.sleep(0.5)  # Give Arduino time to process maintmode command
+                                        
+                                        while command_handler.arduino.in_waiting:
+                                            response = command_handler.arduino.readline().decode().strip()
+                                            if response:
+                                                print(f"🟢 Arduino Response: {response}")
+                                
+                                    print(f"Sending to Arduino: {command}")
+                                    command_handler.arduino.write(f"{command}\n".encode())
+                                    
+                                    # Wait longer for maintenance commands that take more time
+                                    if command == 'unclog':
+                                        time.sleep(6)  # 3s hold + 2s movement + 1s buffer
+                                    elif command in ['sweep1', 'sweep2']:
+                                        time.sleep(5)  # 4s sweep + 1s buffer
+                                    else:
+                                        time.sleep(0.1)
                                     
                                     while command_handler.arduino.in_waiting:
                                         response = command_handler.arduino.readline().decode().strip()
                                         if response:
                                             print(f"🟢 Arduino Response: {response}")
-                                
-                                print(f"Sending to Arduino: {command}")
-                                command_handler.arduino.write(f"{command}\n".encode())
-                                
-                                # Wait longer for maintenance commands that take more time
-                                if command == 'unclog':
-                                    time.sleep(6)  # 3s hold + 2s movement + 1s buffer
-                                elif command in ['sweep1', 'sweep2']:
-                                    time.sleep(5)  # 4s sweep + 1s buffer
-                                else:
-                                    time.sleep(0.1)
-                                
-                                while command_handler.arduino.in_waiting:
-                                    response = command_handler.arduino.readline().decode().strip()
-                                    if response:
-                                        print(f"🟢 Arduino Response: {response}")
-                                
-                                # For maintenance commands that require maintenance mode, send maintend after
-                                if command in ['unclog', 'sweep1', 'sweep2']:
-                                    print("Sending maintend command to exit maintenance mode...")
-                                    command_handler.arduino.write("maintend\n".encode())
-                                    time.sleep(0.5)  # Give Arduino time to process maintend command
                                     
-                                    while command_handler.arduino.in_waiting:
-                                        response = command_handler.arduino.readline().decode().strip()
-                                        if response:
-                                            print(f"🟢 Arduino Response: {response}")
-                                
-                                # Record the sorting operation if it's a sorting command
-                                if command in ['ndeg', 'zdeg', 'odeg']:
-                                    # Find the trash type for this servo command using mapping
-                                    trash_type = mapping.get(command)
-                                    if trash_type:
-                                        try:
-                                            requests.post(
-                                                f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
-                                                json={
-                                                    'device_identity': sorter_id,
-                                                    'trash_type': trash_type,
-                                                    'is_maintenance': True
-                                                }
-                                            )
-                                        except Exception as e:
-                                            print(f"\n⚠️ Error recording sorting: {e}")
-                                
-                                # Mark command as executed
-                                requests.post(
-                                    f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
-                                    json={'device_identity': sorter_id, 'command': command}
-                                )
-            except Exception as e:
-                print(f"\n❌ Error checking maintenance commands: {e}")
+                                    # For maintenance commands that require maintenance mode, send maintend after
+                                    if command in ['unclog', 'sweep1', 'sweep2']:
+                                        print("Sending maintend command to exit maintenance mode...")
+                                        command_handler.arduino.write("maintend\n".encode())
+                                        time.sleep(0.5)  # Give Arduino time to process maintend command
+                                        
+                                        while command_handler.arduino.in_waiting:
+                                            response = command_handler.arduino.readline().decode().strip()
+                                            if response:
+                                                print(f"🟢 Arduino Response: {response}")
+                                    
+                                    # Record the sorting operation if it's a sorting command
+                                    if command in ['ndeg', 'zdeg', 'odeg']:
+                                        # Find the trash type for this servo command using mapping
+                                        trash_type = mapping.get(command)
+                                        if trash_type:
+                                            try:
+                                                requests.post(
+                                                    f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
+                                                    json={
+                                                        'device_identity': sorter_id,
+                                                        'trash_type': trash_type,
+                                                        'is_maintenance': True
+                                                    }
+                                                )
+                                            except Exception as e:
+                                                print(f"\n⚠️ Error recording sorting: {e}")
+                                    
+                                    # Mark command as executed
+                                    requests.post(
+                                        f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
+                                        json={'device_identity': sorter_id, 'command': command}
+                                    )
+                except Exception as e:
+                    print(f"\n❌ Error checking maintenance commands: {e}")
             
             # Skip YOLOv8 inference during maintenance
             results = []
