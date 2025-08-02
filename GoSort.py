@@ -313,8 +313,6 @@ def main():
     except Exception as e:
         print(f"Warning: Could not fetch mapping, using default. {e}")
         mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
-    # Reverse mapping: trash type -> servo command
-    trash_to_cmd = {v: k for k, v in mapping.items()}
     # For menu display: get the order and labels
     menu_order = [('zdeg', mapping['zdeg']), ('ndeg', mapping['ndeg']), ('odeg', mapping['odeg'])]
     trash_labels = {'bio': 'Biodegradable', 'nbio': 'Non-Biodegradable', 'recyc': 'Recyclable'}
@@ -472,7 +470,6 @@ def main():
                 except Exception as e:
                     print(f"Warning: Could not fetch mapping, using default. {e}")
                     mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
-                trash_to_cmd = {v: k for k, v in mapping.items()}
                 menu_order = [('zdeg', mapping['zdeg']), ('ndeg', mapping['ndeg']), ('odeg', mapping['odeg'])]
                 print_menu()
             last_maintenance_status = current_maintenance
@@ -489,23 +486,51 @@ def main():
                     data = response.json()
                     if data.get('success') and data.get('command'):
                         command = data['command']
-                        print(f"\n📡 Executing maintenance command: {command}")
+                        print(f"\n📡 Received maintenance command from server: {command}")
+                        print(f"Current mapping: {mapping}")
+                        
+                        # For maintenance commands that require maintenance mode, send maintmode first
+                        if command in ['unclog', 'sweep1', 'sweep2']:
+                            print("Sending maintmode command to enable maintenance mode...")
+                            ser.write("maintmode\n".encode())
+                            time.sleep(0.5)  # Give Arduino time to process maintmode command
+                            
+                            while ser.in_waiting:
+                                response = ser.readline().decode().strip()
+                                if response:
+                                    print(f"🟢 Arduino Response: {response}")
+                        
+                        print(f"Sending to Arduino: {command}")
                         ser.write(f"{command}\n".encode())
-                        time.sleep(0.1)
+                        
+                        # Wait longer for maintenance commands that take more time
+                        if command == 'unclog':
+                            time.sleep(6)  # 3s hold + 2s movement + 1s buffer
+                        elif command in ['sweep1', 'sweep2']:
+                            time.sleep(5)  # 4s sweep + 1s buffer
+                        else:
+                            time.sleep(0.1)
                         
                         while ser.in_waiting:
                             response = ser.readline().decode().strip()
                             if response:
                                 print(f"🟢 Arduino Response: {response}")
                         
+                        # For maintenance commands that require maintenance mode, send maintend after
+                        if command in ['unclog', 'sweep1', 'sweep2']:
+                            print("Sending maintend command to exit maintenance mode...")
+                            ser.write("maintend\n".encode())
+                            time.sleep(0.5)  # Give Arduino time to process maintend command
+                            
+                            while ser.in_waiting:
+                                response = ser.readline().decode().strip()
+                                if response:
+                                    print(f"🟢 Arduino Response: {response}")
+                        
                         # Record the sorting operation if it's a sorting command
                         if command in ['ndeg', 'zdeg', 'odeg']:
-                            # Find the logical trash type for this command
-                            trash_type = None
-                            for ttype, cmd in trash_to_cmd.items():
-                                if cmd == command:
-                                    trash_type = ttype
-                                    break
+                            # Find the trash type for this servo command using mapping
+                            trash_type = mapping.get(command)
                             if trash_type:
                                 try:
                                     requests.post(
@@ -576,7 +601,14 @@ def main():
                      print("Invalid choice.")
                      continue
                  trash_type = menu_order[idx][1]
-                 command = trash_to_cmd.get(trash_type, 'zdeg')
+                 # Find the servo command for this trash type
+                 command = None
+                 for servo_key, ttype in mapping.items():
+                     if ttype == trash_type:
+                         command = servo_key
+                         break
+                 if not command:
+                     command = 'zdeg'  # Default fallback
                  ser.write(f"{command}\n".encode())
                  print(f"\n🔄 Moving to {command.upper()}...")
                  time.sleep(0.1)

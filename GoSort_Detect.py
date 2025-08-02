@@ -13,6 +13,8 @@ import concurrent.futures
 import threading
 import sys
 import msvcrt
+import platform
+import cpuinfo
 
 def is_maintenance_mode():
     return os.path.exists('python_maintenance_mode.txt')
@@ -498,6 +500,10 @@ def main():
     last_heartbeat = 0
     heartbeat_interval = 5  # Send heartbeat every 5 seconds
 
+    # Track maintenance status for change detection
+    last_maintenance_status = False
+    check_interval = 1  # Check maintenance mode every second
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
@@ -506,7 +512,6 @@ def main():
         device_name = torch.cuda.get_device_name(0)
         print(f"GPU: {device_name}")
     else:
-        import platform, cpuinfo
         device_name = cpuinfo.get_cpu_info()['brand_raw']
         print(f"CPU: {device_name}")
     
@@ -587,14 +592,33 @@ def main():
                 # Remove from waiting devices if heartbeat fails
                 remove_from_waiting_devices(ip_address, sorter_id)
 
-        # Handle maintenance mode
-        in_maintenance = check_maintenance_mode(ip_address, sorter_id)
-        if in_maintenance:
+        # Check maintenance mode periodically
+        current_maintenance = check_maintenance_mode(ip_address, sorter_id)
+        
+        # If maintenance status changed, notify user
+        if current_maintenance != last_maintenance_status:
+            if current_maintenance:
+                print("\n🔧 Entering maintenance mode - Detection paused")
+                print("Listening for maintenance commands...")
+            else:
+                print("\n✅ Exiting maintenance mode - Detection resumed")
+                # Re-fetch mapping after maintenance mode
+                try:
+                    resp = requests.get(mapping_url)
+                    mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
+                except Exception as e:
+                    print(f"Warning: Could not fetch mapping, using default. {e}")
+                    mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
+                # Update reverse mapping
+                trash_to_cmd = {v: k for k, v in mapping.items()}
+            last_maintenance_status = current_maintenance
+
+        # If in maintenance mode, check for and execute maintenance commands
+        if current_maintenance:
             # Add red maintenance mode text
             cv2.putText(frame, "MAINTENANCE MODE - Detection Paused", (10, 110), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
-            # Check for and execute maintenance commands
             try:
                 response = requests.post(
                     f"http://{ip_address}/GoSort_Web/gs_DB/check_maintenance_commands.php",
@@ -605,7 +629,9 @@ def main():
                     data = response.json()
                     if data.get('success') and data.get('command'):
                         command = data['command']
-                        print(f"\n📡 Executing maintenance command: {command}")
+                        print(f"\n📡 Received maintenance command from server: {command}")
+                        print(f"Current mapping: {mapping}")
+                        
                         # Shutdown logic
                         if command == 'shutdown':
                             print("\n⚠️ Shutdown command received. Shutting down computer...")
@@ -624,32 +650,55 @@ def main():
                         # Send command to Arduino if available
                         if command_handler is not None:
                             if command_handler.command_queue.empty():
-                                # Map old commands to new ones
-                                cmd_map = {'nbio': 'zdeg', 'bio': 'ndeg', 'recyc': 'odeg'}
-                                send_command = cmd_map.get(command, command)
-                                cmd = ArduinoCommand(f"{send_command}\n")
-                                command_handler.command_queue.put(cmd)
+                                # For maintenance commands that require maintenance mode, send maintmode first
+                                if command in ['unclog', 'sweep1', 'sweep2']:
+                                    print("Sending maintmode command to enable maintenance mode...")
+                                    command_handler.arduino.write("maintmode\n".encode())
+                                    time.sleep(0.5)  # Give Arduino time to process maintmode command
+                                    
+                                    while command_handler.arduino.in_waiting:
+                                        response = command_handler.arduino.readline().decode().strip()
+                                        if response:
+                                            print(f"🟢 Arduino Response: {response}")
                                 
-                                # Wait for this command to complete
-                                while not cmd.done and command_handler.running:
+                                print(f"Sending to Arduino: {command}")
+                                command_handler.arduino.write(f"{command}\n".encode())
+                                
+                                # Wait longer for maintenance commands that take more time
+                                if command == 'unclog':
+                                    time.sleep(6)  # 3s hold + 2s movement + 1s buffer
+                                elif command in ['sweep1', 'sweep2']:
+                                    time.sleep(5)  # 4s sweep + 1s buffer
+                                else:
                                     time.sleep(0.1)
-                                print("✅ Maintenance command executed")
+                                
+                                while command_handler.arduino.in_waiting:
+                                    response = command_handler.arduino.readline().decode().strip()
+                                    if response:
+                                        print(f"🟢 Arduino Response: {response}")
+                                
+                                # For maintenance commands that require maintenance mode, send maintend after
+                                if command in ['unclog', 'sweep1', 'sweep2']:
+                                    print("Sending maintend command to exit maintenance mode...")
+                                    command_handler.arduino.write("maintend\n".encode())
+                                    time.sleep(0.5)  # Give Arduino time to process maintend command
+                                    
+                                    while command_handler.arduino.in_waiting:
+                                        response = command_handler.arduino.readline().decode().strip()
+                                        if response:
+                                            print(f"🟢 Arduino Response: {response}")
                                 
                                 # Record the sorting operation if it's a sorting command
-                                if send_command in ['ndeg', 'zdeg', 'odeg']:
-                                    # Find the logical trash type for this command
-                                    trash_type_maint = None
-                                    for ttype, cmd in trash_to_cmd.items():
-                                        if cmd == send_command:
-                                            trash_type_maint = ttype
-                                            break
-                                    if trash_type_maint:
+                                if command in ['ndeg', 'zdeg', 'odeg']:
+                                    # Find the trash type for this servo command using mapping
+                                    trash_type = mapping.get(command)
+                                    if trash_type:
                                         try:
                                             requests.post(
                                                 f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
                                                 json={
                                                     'device_identity': sorter_id,
-                                                    'trash_type': trash_type_maint,
+                                                    'trash_type': trash_type,
                                                     'is_maintenance': True
                                                 }
                                             )
@@ -659,7 +708,7 @@ def main():
                                 # Mark command as executed
                                 requests.post(
                                     f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
-                                    json={'device_identity': sorter_id, 'command': send_command}
+                                    json={'device_identity': sorter_id, 'command': command}
                                 )
             except Exception as e:
                 print(f"\n❌ Error checking maintenance commands: {e}")
@@ -678,7 +727,7 @@ def main():
             frame_count = 0
             fps_time = current_time
 
-        if not in_maintenance:
+        if not current_maintenance:
             for result in results:
                 boxes = result.boxes.cpu().numpy()
                 for box in boxes:
