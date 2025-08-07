@@ -418,6 +418,11 @@ def remove_from_waiting_devices(ip_address, device_identity):
 
 def main():
     config = load_config()
+    # Force CPU mode if CUDA is not available, even if config says 'cuda'
+    if config.get('device_mode') == 'cuda' and not torch.cuda.is_available():
+        print("CUDA selected in config, but CUDA is not available. Switching to CPU.")
+        config['device_mode'] = 'cpu'
+        save_config(config)
     # First get IP address
     ip_address = get_ip_address()
     config['ip_address'] = ip_address
