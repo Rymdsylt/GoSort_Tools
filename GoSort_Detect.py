@@ -504,11 +504,40 @@ def main():
     last_maintenance_status = False
     check_interval = 1  # Check maintenance mode every second
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Device mode selection (CPU/GPU)
+    if config.get('device_mode') is None:
+        print("\nDevice Mode Configuration")
+        gpu_available = torch.cuda.is_available()
+        if gpu_available:
+            print("Select device mode:")
+            print("1. GPU (CUDA)")
+            print("2. CPU")
+            while True:
+                choice = input("Enter 1 for GPU or 2 for CPU: ").strip()
+                if choice == '1':
+                    config['device_mode'] = 'gpu'
+                    break
+                elif choice == '2':
+                    config['device_mode'] = 'cpu'
+                    break
+                else:
+                    print("Invalid input. Please enter 1 or 2.")
+        else:
+            print("No GPU detected. Defaulting to CPU mode.")
+            config['device_mode'] = 'cpu'
+        save_config(config)
+    device_mode = config.get('device_mode')
+    print(f"Using device mode: {device_mode.upper()}")
+
+    # Use device_mode from config to set torch.device
+    if device_mode == 'gpu' and torch.cuda.is_available():
+        device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
     print(f"Using device: {device}")
     
     device_name = ""
-    if torch.cuda.is_available():
+    if device.type == 'cuda':
         device_name = torch.cuda.get_device_name(0)
         print(f"GPU: {device_name}")
     else:
@@ -516,12 +545,13 @@ def main():
         print(f"CPU: {device_name}")
     
     model = YOLO('best.pt')
-    if torch.cuda.is_available():
+    if device.type == 'cuda':
         model.to('cuda')
 
     model.conf = 0.78
     model.iou = 0.45
 
+    # Connect to Arduino regardless of device mode
     try:
         import serial
         # Try to connect to Arduino Mega 2560
