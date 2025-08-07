@@ -506,18 +506,54 @@ def main():
     last_maintenance_status = False
     check_interval = 1  # Check maintenance mode every second
 
-    # Device mode selection (CPU/GPU)
+
+    # Device mode selection (CPU/GPU/DirectML)
     if config.get('device_mode') is None:
         print("\nDevice Mode Configuration")
-        gpu_available = torch.cuda.is_available()
-        if gpu_available:
+        # Check for CUDA (NVIDIA), DirectML (AMD/Intel), or CPU
+        cuda_available = torch.cuda.is_available()
+        directml_available = False
+        try:
+            import torch_directml
+            directml_available = True
+        except ImportError:
+            directml_available = False
+
+        if cuda_available:
             print("Select device mode:")
-            print("1. GPU (CUDA)")
+            print("1. GPU (CUDA/NVIDIA)")
+            if directml_available:
+                print("2. GPU (DirectML/AMD/Intel)")
+                print("3. CPU")
+                valid_choices = ['1', '2', '3']
+            else:
+                print("2. CPU")
+                valid_choices = ['1', '2']
+            while True:
+                choice = input("Enter device mode number: ").strip()
+                if choice == '1':
+                    config['device_mode'] = 'cuda'
+                    break
+                elif choice == '2' and directml_available:
+                    config['device_mode'] = 'directml'
+                    break
+                elif choice == '2' and not directml_available:
+                    config['device_mode'] = 'cpu'
+                    break
+                elif choice == '3' and directml_available:
+                    config['device_mode'] = 'cpu'
+                    break
+                else:
+                    print("Invalid input. Please enter a valid number.")
+        elif directml_available:
+            print("DirectML (AMD/Intel GPU) detected.")
+            print("Select device mode:")
+            print("1. GPU (DirectML)")
             print("2. CPU")
             while True:
-                choice = input("Enter 1 for GPU or 2 for CPU: ").strip()
+                choice = input("Enter 1 for DirectML GPU or 2 for CPU: ").strip()
                 if choice == '1':
-                    config['device_mode'] = 'gpu'
+                    config['device_mode'] = 'directml'
                     break
                 elif choice == '2':
                     config['device_mode'] = 'cpu'
@@ -528,27 +564,44 @@ def main():
             print("No GPU detected. Defaulting to CPU mode.")
             config['device_mode'] = 'cpu'
         save_config(config)
+
     device_mode = config.get('device_mode')
     print(f"Using device mode: {device_mode.upper()}")
 
-    # Use device_mode from config to set torch.device
-    if device_mode == 'gpu' and torch.cuda.is_available():
+    # Set torch.device based on selected mode
+    if device_mode == 'cuda' and torch.cuda.is_available():
         device = torch.device('cuda')
+    elif device_mode == 'directml':
+        try:
+            import torch_directml
+            device = torch_directml.device()
+        except ImportError:
+            print("torch-directml not installed. Falling back to CPU.")
+            device = torch.device('cpu')
     else:
         device = torch.device('cpu')
     print(f"Using device: {device}")
-    
+
     device_name = ""
-    if device.type == 'cuda':
+    if device_mode == 'cuda' and torch.cuda.is_available():
         device_name = torch.cuda.get_device_name(0)
+        print(f"GPU: {device_name}")
+    elif device_mode == 'directml':
+        device_name = "AMD/Intel GPU (DirectML)"
         print(f"GPU: {device_name}")
     else:
         device_name = cpuinfo.get_cpu_info()['brand_raw']
         print(f"CPU: {device_name}")
-    
+
     model = YOLO('best.pt')
-    if device.type == 'cuda':
+    # Move model to selected device if possible
+    if device_mode == 'cuda' and torch.cuda.is_available():
         model.to('cuda')
+    elif device_mode == 'directml':
+        try:
+            model.to(device)
+        except Exception as e:
+            print(f"Warning: Could not move model to DirectML device: {e}")
 
     model.conf = 0.78
     model.iou = 0.45
