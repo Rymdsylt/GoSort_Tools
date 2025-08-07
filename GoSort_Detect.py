@@ -534,14 +534,26 @@ def main():
     # Use device_mode from config to set torch.device
     if device_mode == 'gpu' and torch.cuda.is_available():
         device = torch.device('cuda')
+        backend = 'CUDA (NVIDIA GPU)'
     else:
-        device = torch.device('cpu')
+        # Try DirectML for integrated graphics
+        try:
+            import torch_directml
+            device = torch_directml.device()
+            backend = 'DirectML (Integrated Graphics)'
+        except ImportError:
+            device = torch.device('cpu')
+            backend = 'CPU'
     print(f"Using device: {device}")
+    print(f"Backend: {backend}")
     
     device_name = ""
     if device.type == 'cuda':
         device_name = torch.cuda.get_device_name(0)
         print(f"GPU: {device_name}")
+    elif 'DirectML' in backend:
+        device_name = 'Integrated Graphics (DirectML)'
+        print(f"Integrated Graphics: {device_name}")
     else:
         device_name = cpuinfo.get_cpu_info()['brand_raw']
         print(f"CPU: {device_name}")
@@ -549,6 +561,8 @@ def main():
     model = YOLO('best.pt')
     if device.type == 'cuda':
         model.to('cuda')
+    elif 'DirectML' in backend:
+        model.to(device)
 
     model.conf = 0.78
     model.iou = 0.45
