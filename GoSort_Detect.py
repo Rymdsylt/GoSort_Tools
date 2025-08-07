@@ -808,8 +808,13 @@ def main():
             results = []
         else:
             # Only run YOLOv8 when not in maintenance mode
-            with torch.cuda.amp.autocast(), torch.inference_mode(): 
-                results = model(frame, stream=True)  
+            # Only use autocast for CUDA, otherwise just use inference_mode
+            if device.type == 'cuda':
+                with torch.cuda.amp.autocast(), torch.inference_mode():
+                    results = model(frame, stream=True)
+            else:
+                with torch.inference_mode():
+                    results = model(frame, stream=True)
 
         # Update FPS counter
         current_time = time.time()
