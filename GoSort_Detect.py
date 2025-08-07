@@ -808,8 +808,8 @@ def main():
             results = []
         else:
             # Only run YOLOv8 when not in maintenance mode
-            # Call model(frame, stream=True) directly for both CUDA and CPU to avoid PyTorch version_counter errors
-            results = model(frame, stream=True)
+            # Use model(frame) instead of stream=True to avoid PyTorch version_counter errors
+            results = model(frame)
 
         # Update FPS counter
         current_time = time.time()
