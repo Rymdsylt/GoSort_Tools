@@ -16,6 +16,19 @@ import msvcrt
 import platform
 import cpuinfo
 
+# Helper function to get correct autocast context for device
+def get_autocast_context(device_mode):
+    if device_mode == 'cuda' and torch.cuda.is_available():
+        return torch.amp.autocast('cuda')
+    elif device_mode == 'directml':
+        # DirectML uses CPU autocast context
+        return torch.amp.autocast('cpu')
+    else:
+        # For CPU, return a dummy context manager
+        from contextlib import nullcontext
+        return nullcontext()
+
+
 def is_maintenance_mode():
     return os.path.exists('python_maintenance_mode.txt')
 
@@ -847,7 +860,8 @@ def main():
             results = []
         else:
             # Only run YOLOv8 when not in maintenance mode
-            with torch.cuda.amp.autocast(), torch.inference_mode(): 
+            autocast_ctx = get_autocast_context(device_mode)
+            with autocast_ctx, torch.inference_mode():
                 results = model(frame, stream=True)  
 
         # Update FPS counter
