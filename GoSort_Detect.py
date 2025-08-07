@@ -407,6 +407,8 @@ def main():
     config = load_config()
     # First get IP address
     ip_address = get_ip_address()
+    config['ip_address'] = ip_address
+    save_config(config)
     print(f"\nUsing GoSort server at: {ip_address}")
 
     # Then get identity configuration
