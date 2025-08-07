@@ -808,13 +808,12 @@ def main():
             results = []
         else:
             # Only run YOLOv8 when not in maintenance mode
-            # Only use autocast for CUDA, otherwise just use inference_mode
+            # Ultralytics YOLOv8 API handles inference context internally; do not use torch.inference_mode()
             if device.type == 'cuda':
-                with torch.cuda.amp.autocast(), torch.inference_mode():
+                with torch.cuda.amp.autocast():
                     results = model(frame, stream=True)
             else:
-                with torch.inference_mode():
-                    results = model(frame, stream=True)
+                results = model(frame, stream=True)
 
         # Update FPS counter
         current_time = time.time()
