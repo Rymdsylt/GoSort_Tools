@@ -553,52 +553,58 @@ def main():
     model.conf = 0.78
     model.iou = 0.45
 
-    # Connect to Arduino regardless of device mode
+    # Connect to Arduino regardless of device mode, searching all COM ports
     try:
         import serial
-        # Try to connect to Arduino Mega 2560
-        arduino = serial.Serial('COM3', 19200, timeout=1)
-        time.sleep(2)  # Wait for Arduino to reset after serial connection
-        print("Connected to Arduino Mega 2560")
-        
-        # Send gosort_ready directly through serial
-        arduino.write(b'gosort_ready\n')
-        print("Sent gosort_ready signal")
-        
-        # Wait for initialization response
-        while arduino.in_waiting:
-            response = arduino.readline().decode().strip()
-            print(f"Arduino: {response}")
-        
-        # Create command handler after initialization
-        command_handler = CommandHandler(arduino)
-        
-        # Track Arduino connection status
-        arduino_connected = True
-        
-        def check_arduino_connection():
-            """Check if Arduino is still connected"""
-            nonlocal arduino_connected
-            try:
-                # Try to get port info to check if Arduino is still connected
-                if not arduino.is_open:
-                    arduino_connected = False
-                    return False
-                
-                # Try a simple write operation to test connection
-                arduino.write(b'ping\n')
-                time.sleep(0.1)
-                return True
-            except (serial.SerialException, OSError, Exception) as e:
-                print(f"\n❌ Arduino connection lost: {e}")
-                arduino_connected = False
-                return False
-    except Exception as e:
-        print(f"Failed to connect to Arduino: {e}")
+        import serial.tools.list_ports
         arduino = None
         command_handler = None
         arduino_connected = False
-        
+        candidate_ports = list(serial.tools.list_ports.comports())
+        for port in candidate_ports:
+            if 'Arduino' in port.description or '2560' in port.description or True:  # Try all ports, prefer Arduino/2560
+                try:
+                    arduino = serial.Serial(port.device, 19200, timeout=1)
+                    time.sleep(2)  # Wait for Arduino to reset after serial connection
+                    print(f"Connected to Arduino on {port.device} ({port.description})")
+                    # Send gosort_ready directly through serial
+                    arduino.write(b'gosort_ready\n')
+                    print("Sent gosort_ready signal")
+                    # Wait for initialization response
+                    while arduino.in_waiting:
+                        response = arduino.readline().decode().strip()
+                        print(f"Arduino: {response}")
+                    # Create command handler after initialization
+                    command_handler = CommandHandler(arduino)
+                    arduino_connected = True
+                    def check_arduino_connection():
+                        nonlocal arduino_connected
+                        try:
+                            if not arduino.is_open:
+                                arduino_connected = False
+                                return False
+                            arduino.write(b'ping\n')
+                            time.sleep(0.1)
+                            return True
+                        except (serial.SerialException, OSError, Exception) as e:
+                            print(f"\n❌ Arduino connection lost: {e}")
+                            arduino_connected = False
+                            return False
+                    break  # Stop after first successful connection
+                except Exception as e:
+                    print(f"Failed to connect to {port.device}: {e}")
+                    if arduino:
+                        arduino.close()
+                    arduino = None
+        if not arduino_connected:
+            print("No Arduino found on any COM port.")
+            def check_arduino_connection():
+                return False
+    except Exception as e:
+        print(f"Error during Arduino port search: {e}")
+        arduino = None
+        command_handler = None
+        arduino_connected = False
         def check_arduino_connection():
             return False
 
