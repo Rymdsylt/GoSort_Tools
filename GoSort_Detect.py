@@ -808,8 +808,8 @@ def main():
             results = []
         else:
             # Only run YOLOv8 when not in maintenance mode
-            # Use model(frame) instead of stream=True to avoid PyTorch version_counter errors
-            results = model(frame)
+            # Use model.predict(frame, stream=False) to avoid PyTorch version_counter errors
+            results = model.predict(frame, stream=False)
 
         # Update FPS counter
         current_time = time.time()
