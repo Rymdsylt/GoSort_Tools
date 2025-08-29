@@ -5,9 +5,33 @@ import os
 import socket
 import concurrent.futures
 import threading
-import ipaddress
 import msvcrt
 import sys
+
+class SimulatedArduino:
+    def __init__(self):
+        self.current_position = 'center'  # Start at center
+        self.moving = False
+        self.last_command = None
+    
+    def write(self, command):
+        command = command.decode('utf-8').strip()
+        self.last_command = command
+        self.moving = True
+        print(f"\n🔄 Simulated servo moving to {command}...")
+        time.sleep(2)  # Simulate movement time
+        self.current_position = command
+        self.moving = False
+        print(f"✅ Simulated servo moved to {command}")
+        return len(command)
+    
+    def readline(self):
+        if self.moving:
+            return b"moving\n"
+        return b"ready\n"
+    
+    def is_open(self):
+        return True
 
 def check_maintenance_mode(ip_address, device_identity):
     try:
@@ -79,6 +103,7 @@ def scan_network():
         except:
             pass
         update_progress()
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
         executor.map(check_ip, network_ips)
 
@@ -96,460 +121,214 @@ def check_server(ip):
         if response.status_code == 200 or (response.status_code == 400 and "No trash type provided" in response.text):
             print("\r✅ Server connection successful!")
             return True
-        print("\r❌ GoSort does not exist in this server")
+        print("\r❌ Server check failed - Invalid response")
         return False
-    except requests.exceptions.RequestException:
-        print("\r❌ GoSort does not exist in this server")
+    except requests.exceptions.RequestException as e:
+        print(f"\r❌ Server check failed - {str(e)}")
         return False
 
-def get_ip_address():
-    config = load_config()
-    ip = config.get('ip_address')
-    
-    while True:
-        if not ip:
-            # Scan network for available IPs
-            gosort_ips, available_ips = scan_network()
-            
-            if not gosort_ips and not available_ips:
-                print("\nNo devices found in the network.")
-                ip = input("\nEnter GoSort IP address manually (e.g., 192.168.1.100): ")
-            else:
-                print("\nAvailable IP addresses:")
-                
-                # First list GoSort servers if any
-                if gosort_ips:
-                    print("\n🟢 GoSort servers found:")
-                    for i, ip_addr in enumerate(gosort_ips):
-                        print(f"{i+1}. {ip_addr}")
-                
-                # Then list other available IPs
-                if available_ips:
-                    print("\n⚪ Other devices found:")
-                    offset = len(gosort_ips)
-                    for i, ip_addr in enumerate(available_ips):
-                        print(f"{i+offset+1}. {ip_addr}")
-                
-                # Manual entry option
-                print(f"{len(gosort_ips) + len(available_ips) + 1}. Enter IP manually")
-                
-                while True:
-                    try:
-                        choice = int(input("\nChoose an IP address (enter the number): "))
-                        if 1 <= choice <= len(gosort_ips):
-                            ip = gosort_ips[choice-1]
-                            break
-                        elif len(gosort_ips) < choice <= len(gosort_ips) + len(available_ips):
-                            ip = available_ips[choice-len(gosort_ips)-1]
-                            break
-                        elif choice == len(gosort_ips) + len(available_ips) + 1:
-                            ip = input("\nEnter GoSort IP address manually: ")
-                            break
-                        else:
-                            print("Invalid choice. Please try again.")
-                    except ValueError:
-                        print("Invalid input. Please enter a number.")
-        
-        # Verify the selected IP
-        if check_server(ip):
-            config['ip_address'] = ip
-            save_config(config)
-            return ip
-        else:
-            # If check fails, clear the IP and start over
-            ip = None
-            config['ip_address'] = None
-            save_config(config)
-
-def add_to_waiting_devices(ip_address, device_identity):
+def check_maintenance_commands(ip_address, device_identity, ser):
     try:
-        url = f"http://{ip_address}/GoSort_Web/gs_DB/add_waiting_device.php"
-        response = requests.post(url, json={
-            'identity': device_identity
-        })
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('success'):
-                return True
-            print(f"\n❌ Server error: {data.get('message', 'Unknown error')}")
-        return False
-    except Exception as e:
-        print(f"\n❌ Error adding device to waiting list: {e}")
-        return False
-
-def request_registration(ip_address, identity):
-    try:
-        # First check if device is in sorters table
-        url = f"http://{ip_address}/GoSort_Web/gs_DB/verify_sorter.php"
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/check_maintenance_commands.php"
         response = requests.post(
             url,
-            json={'identity': identity},
+            json={'device_identity': device_identity},
             headers={'Content-Type': 'application/json'}
         )
+        
         if response.status_code == 200:
             data = response.json()
-            if data.get('success'):
-                if data.get('registered'):
-                    return True, None
-                else:
-                    # Try to add to waiting devices
-                    response = requests.post(
-                        f"http://{ip_address}/GoSort_Web/gs_DB/add_waiting_device.php",
-                        json={'identity': identity}
-                    )
-                    if response.status_code == 200:
-                        data = response.json()
-                        if data.get('success'):
-                            if 'already in waiting list' in data.get('message', ''):
-                                return False, "duplicate"
-                            print("\n✅ Added to waiting devices list")
-                            return False, None
-                    return False, None
-            print(f"\n❌ Server error: {data.get('message', 'Unknown error')}")
-        return False, None
+            if data.get('success') and data.get('commands'):
+                for cmd in data.get('commands', []):
+                    print(f"\n⚙️ Executing maintenance command: {cmd}")
+                    ser.write(cmd.encode())
+                    time.sleep(0.1)  # Small delay between commands
+                    
+                # Mark commands as executed
+                requests.post(
+                    f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
+                    json={'device_identity': device_identity},
+                    headers={'Content-Type': 'application/json'}
+                )
     except Exception as e:
-        print(f"\n❌ Error requesting registration: {e}")
-        return False, None
+        print(f"\n❌ Error checking maintenance commands: {e}")
 
-def restart_program():
-    print("\n🔄 Restarting application...")
-    python = sys.executable
-    os.execl(python, python, *sys.argv)
-
-def is_identity_duplicate(ip_address, identity):
+def set_device_offline(ip_address, device_identity):
     try:
-        print("Checking for identical identity...")
-        url = f"http://{ip_address}/GoSort_Web/gs_DB/check_duplicate_identity.php"
-        response = requests.post(url, json={'identity': identity}, headers={'Content-Type': 'application/json'})
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('success'):
-                status = data.get('status')
-                if status == 'waiting':
-                    return True, "waiting"
-                elif status == 'registered':
-                    return True, "registered"
-        return False, None
-    except Exception as e:
-        print(f"Error checking duplicate identity: {e}")
-        return False, None
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/set_device_offline.php"
+        requests.post(
+            url,
+            json={'device_identity': device_identity},
+            headers={'Content-Type': 'application/json'}
+        )
+    except:
+        pass
 
-def remove_from_waiting_devices(ip_address, device_identity):
+def update_connection_status(ip_address, device_identity):
     try:
-        url = f"http://{ip_address}/GoSort_Web/gs_DB/remove_waiting_device.php"
-        response = requests.post(url, json={'identity': device_identity}, headers={'Content-Type': 'application/json'})
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('success'):
-                print(f"\n✅ Removed {device_identity} from waiting devices list")
-                return True
-        return False
-    except Exception as e:
-        print(f"\n❌ Error removing from waiting devices: {e}")
-        return False
+        url = f"http://{ip_address}/GoSort_Web/gs_DB/connection_status.php"
+        requests.post(
+            url,
+            json={'device_identity': device_identity},
+            headers={'Content-Type': 'application/json'}
+        )
+    except:
+        pass
 
 def main():
-    config = load_config()
-    # First get IP address
-    ip_address = get_ip_address()
-    print(f"\nUsing GoSort server at: {ip_address}")
-
-    # Then get or set identity
-    config = load_config()
-    if config.get('sorter_id') is None:
-        print("\nFirst time setup - Sorter Identity Configuration")
-        while True:
-            sorter_id = input("Enter Sorter Identity (e.g., Sorter1): ")
-            is_duplicate, status = is_identity_duplicate(ip_address, sorter_id)
-            if is_duplicate:
-                if status == "waiting":
-                    print("Identical Identity Found in waiting list, reenter")
-                elif status == "registered":
-                    print("Identical Identity Found in registered devices, reenter")
-                continue
-            config['sorter_id'] = sorter_id
-            save_config(config)
-            break
+    print("📦 GoSort Simulation System")
+    print("======================")
     
-    # Fetch mapping from backend
-    mapping_url = f"http://{ip_address}/GoSort_Web/gs_DB/save_sorter_mapping.php?device_identity={config['sorter_id']}"
+    config = load_config()
+    ip_address = config.get('ip_address')
+    device_identity = config.get('sorter_id')
+
+    if not ip_address or not device_identity:
+        print("\n⚙️ Initial setup required")
+        gosort_ips, _ = scan_network()
+        
+        if not gosort_ips:
+            print("\n❌ No GoSort servers found on the network")
+            return
+        
+        print("\nAvailable GoSort servers:")
+        for i, ip in enumerate(gosort_ips, 1):
+            print(f"{i}. {ip}")
+        
+        while True:
+            try:
+                choice = int(input("\nSelect server number: "))
+                if 1 <= choice <= len(gosort_ips):
+                    ip_address = gosort_ips[choice - 1]
+                    break
+                print("Invalid selection")
+            except ValueError:
+                print("Please enter a number")
+        
+        if not check_server(ip_address):
+            return
+        
+        device_identity = input("\nEnter sorter ID (e.g., SORTER001): ").strip()
+        if not device_identity:
+            print("\n❌ Invalid sorter ID")
+            return
+        
+        config = {'ip_address': ip_address, 'sorter_id': device_identity}
+        save_config(config)
+        print("\n✅ Configuration saved")
+    
+    print(f"\nServer IP: {ip_address}")
+    print(f"Sorter ID: {device_identity}")
+    
+    # Create simulated Arduino
+    ser = SimulatedArduino()
+    print("\n✅ Simulated hardware initialized")
+    
     try:
-        resp = requests.get(mapping_url)
-        mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
-    except Exception as e:
-        print(f"Warning: Could not fetch mapping, using default. {e}")
-        mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
-    # For menu display: get the order and labels
-    menu_order = [('zdeg', mapping['zdeg']), ('ndeg', mapping['ndeg']), ('odeg', mapping['odeg'])]
-    trash_labels = {'bio': 'Biodegradable', 'nbio': 'Non-Biodegradable', 'recyc': 'Recyclable'}
-
-    print("\nRequesting device registration with the server...")
-    dots_thread = None
-
-    def print_waiting_dots():
         while True:
-            print(".", end="", flush=True)
-            time.sleep(1)
-
-    registered = False
-    first_request = True
-
-    def print_waiting_menu():
-        print("\n\nOptions while waiting:")
-        print("r - Reconfigure Identity")
-        print("a - Reconfigure All (IP and Identity)")
-        print("q - Quit")
-        print("\nPress any other key to check registration status...")
-
-    while not registered:
-        registered, status = request_registration(ip_address, config['sorter_id'])
-        
-        if registered:
-            print("\n✅ Device registration confirmed!")
-            break
-        elif status == "duplicate":
-            print("\n❌ This identity is already in the waiting list")
-            sorter_id = input("Please enter a different Sorter Identity: ")
-            config['sorter_id'] = sorter_id
-            save_config(config)
-            first_request = True
-            continue
-        elif first_request:
-            print("\n⏳ Waiting for admin approval in the GoSort web interface")
-            print(f"    Device Identity: {config['sorter_id']}")
-            print("    Please approve this device in the web interface...")
-            print_waiting_menu()
-            first_request = False
-        
-        # Check for keyboard input (non-blocking)
-        if msvcrt.kbhit():
-            key = msvcrt.getch().decode().lower()
-            if key == 'r':
-                print("\nReconfiguring Sorter Identity")
-                sorter_id = input("Enter new Sorter Identity (e.g., Sorter1): ")
-                config['sorter_id'] = sorter_id
-                save_config(config)
-                print("\n⏳ Trying with new identity:", config['sorter_id'])
-                first_request = True  # Reset to show the waiting message again
+            update_connection_status(ip_address, device_identity)
+            
+            # Check for maintenance mode and commands
+            if check_maintenance_mode(ip_address, device_identity):
+                print("\r🔧 Device in maintenance mode - Checking for commands...", end="", flush=True)
+                check_maintenance_commands(ip_address, device_identity, ser)
+                time.sleep(1)
                 continue
-            elif key == 'a':
-                print("\n⚙️ Reconfiguring All Settings...")
-                # Remove from waiting devices before clearing config
-                remove_from_waiting_devices(ip_address, config['sorter_id'])
-                # Clear IP and identity
-                config['ip_address'] = None
-                config['sorter_id'] = None
-                save_config(config)
-                print("\n✅ All configuration cleared. Please restart the application.")
-                return
-            elif key == 'q':
-                print("\n❌ Registration cancelled. Exiting...")
-                # Remove from waiting devices before exiting
-                remove_from_waiting_devices(ip_address, config['sorter_id'])
-                return
-            else:
-                print("\nChecking registration status...", end="", flush=True)
-        
-        time.sleep(2)  # Check every 2 seconds
-        if not first_request:
-            print(".", end="", flush=True)
-
-    print("\n✅ Connected to GoSort Server (Simulation Mode)")
-    print("🔧 Note: This is simulation mode - no Arduino hardware required")
-    
-    def print_menu():
-        print("\nTrash Selection Menu (Simulation Mode):")
-        for idx, (deg, ttype) in enumerate(menu_order, 1):
-            label = trash_labels.get(ttype, ttype)
-            print(f"{idx}. {label} (SIMULATED)")
-        print("r. Reconfigure IP")
-        print("i. Reconfigure Identity")
-        print("c. Clear All Configuration")
-        print("q. Quit")
-
-    print_menu()
-    last_maintenance_status = False
-    check_interval = 1  # Check maintenance mode every second
-
-    last_heartbeat = 0
-    heartbeat_interval = 10  # Send heartbeat every 10 seconds
-
-    while True:
-        # Send heartbeat periodically to keep device online
-        current_time = time.time()
-        if current_time - last_heartbeat >= heartbeat_interval:
-            try:
-                # Send heartbeat to update last_active
-                requests.post(
-                    f"http://{ip_address}/GoSort_Web/gs_DB/verify_sorter.php",
-                    json={'identity': config['sorter_id']},
-                    headers={'Content-Type': 'application/json'}
-                )
-                last_heartbeat = current_time
-            except Exception as e:
-                print(f"\n⚠️ Heartbeat error: {e}")
-                # Remove from waiting devices if heartbeat fails
-                remove_from_waiting_devices(ip_address, config['sorter_id'])
-
-        # Check maintenance mode periodically
-        current_maintenance = check_maintenance_mode(ip_address, config['sorter_id'])
-        
-        # If maintenance status changed, notify user
-        if current_maintenance != last_maintenance_status:
-            if current_maintenance:
-                print("\n🔧 Entering maintenance mode - Controls disabled")
-                print("Listening for maintenance commands...")
-            else:
-                print("\n✅ Exiting maintenance mode - Controls enabled")
-                # Re-fetch mapping after maintenance mode
-                try:
-                    resp = requests.get(mapping_url)
-                    mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
-                except Exception as e:
-                    print(f"Warning: Could not fetch mapping, using default. {e}")
-                    mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
-                menu_order = [('zdeg', mapping['zdeg']), ('ndeg', mapping['ndeg']), ('odeg', mapping['odeg'])]
-                print_menu()
-            last_maintenance_status = current_maintenance
-
-        # If in maintenance mode, check for and execute maintenance commands
-        if current_maintenance:
-            try:
-                response = requests.post(
-                    f"http://{ip_address}/GoSort_Web/gs_DB/check_maintenance_commands.php",
-                    json={'device_identity': config['sorter_id']},
-                    headers={'Content-Type': 'application/json'}
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get('success') and data.get('command'):
-                        command = data['command']
-                        print(f"\n📡 Received maintenance command from server: {command}")
-                        print(f"Current mapping: {mapping}")
-                        
-                        # Simulate command execution
-                        print(f"🔧 SIMULATION: Executing command: {command}")
-                        
-                        # Simulate different command execution times
-                        if command == 'unclog':
-                            print("🔧 SIMULATION: Unclogging mechanism...")
-                            time.sleep(2)
-                        elif command in ['sweep1', 'sweep2']:
-                            print(f"🔧 SIMULATION: Sweeping mechanism {command}...")
-                            time.sleep(3)
-                        elif command in ['ndeg', 'zdeg', 'odeg']:
-                            print(f"🔧 SIMULATION: Moving to position {command}...")
-                            time.sleep(1)
-                        else:
-                            print(f"🔧 SIMULATION: Executing {command}...")
-                            time.sleep(1)
-                        
-                        print(f"✅ SIMULATION: Command {command} completed successfully")
-                        
-                        # Record the sorting operation if it's a sorting command
-                        if command in ['ndeg', 'zdeg', 'odeg']:
-                            # Find the trash type for this servo command using mapping
-                            trash_type = mapping.get(command)
-                            if trash_type:
-                                try:
-                                    requests.post(
-                                        f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
-                                        json={
-                                            'device_identity': config['sorter_id'],
-                                            'trash_type': trash_type,
-                                            'is_maintenance': True
-                                        }
-                                    )
-                                    print(f"✅ SIMULATION: Sorting operation recorded for {trash_type}")
-                                except Exception as e:
-                                    print(f"\n⚠️ Error recording sorting: {e}")
-                        
-                        # Mark command as executed
-                        requests.post(
-                            f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
-                            json={'device_identity': config['sorter_id'], 'command': command}
-                        )
-                        
-                        if command == 'shutdown':
-                            print("\n⚠️ Shutdown command received. Shutting down computer...")
-                            # Mark command as executed before shutdown
-                            try:
-                                requests.post(
-                                    f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
-                                    json={'device_identity': config['sorter_id'], 'command': command}
-                                )
-                            except Exception as e:
-                                print(f"\n⚠️ Error marking shutdown command as executed: {e}")
-                            os.system('shutdown /s /t 1 /f')
-                            time.sleep(5)
-                            break
-            except Exception as e:
-                print(f"\n❌ Error checking maintenance commands: {e}")
             
-            time.sleep(check_interval)
-            continue
-
-        # Process normal operation input only if available and not in maintenance mode
-        if msvcrt.kbhit():
-            choice = msvcrt.getch().decode().lower()
+            response = ser.readline()
+            if response == b"ready\n":
+                print("\r✅ System ready - Listening for commands", end="", flush=True)
             
-            if choice == 'q':
-                break
-            elif choice == 'r':
-                config = load_config()
-                config['ip_address'] = None
-                save_config(config)
-                print("\nIP configuration reset. Please restart the application.")
-                break
-            elif choice == 'i':
-                config = load_config()
-                print("\nReconfiguring Sorter Identity")
-                sorter_id = input("Enter new Sorter Identity (e.g., Sorter1): ")
-                config['sorter_id'] = sorter_id
-                save_config(config)
-                print("\nSorter Identity updated. Please restart the application.")
-                break
-            elif choice == 'c':
-                # Clear all configuration
-                print("\n⚠️ Clearing all configuration...")
-                if os.path.exists('gosort_config.json'):
-                    os.remove('gosort_config.json')
-                print("✅ All configuration cleared. Please restart the application.")
-                break
-            elif choice in ['1', '2', '3']:
-                 idx = int(choice) - 1
-                 if idx < 0 or idx >= len(menu_order):
-                     print("Invalid choice.")
-                     continue
-                 trash_type = menu_order[idx][1]
-                 command = menu_order[idx][0]
-                 
-                 print(f"\n🔄 SIMULATION: Moving to {command.upper()} for {trash_type}...")
-                 time.sleep(1)  # Simulate movement time
-                 print(f"✅ SIMULATION: Movement completed successfully")
-                 
-                 # Record the sorting operation
-                 try:
-                     requests.post(
-                         f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
-                         json={
-                             'device_identity': config['sorter_id'],
-                             'trash_type': trash_type,
-                             'is_maintenance': False
-                         }
-                     )
-                     print(f"✅ SIMULATION: Sorting operation recorded for {trash_type}")
-                 except Exception as e:
-                     print(f"\n⚠️ Error recording sorting: {e}")
-                 
-                 print_menu()
-            elif choice not in ['\r', '\n']:  # Ignore enter key presses
-                print("\nInvalid choice. Please choose 1, 2, 3, r for IP config, i for Identity config, or q to quit")
-        
-        # Add a small delay to prevent the loop from running too fast
-        time.sleep(0.1)
+            # Show options menu
+            print("\r⌨️  Options: [1]Bio [2]Non-Bio [3]Hazardous [4]Mixed [5]Test Mode [6]Menu [7]Setup [q]Quit", end="", flush=True)
+            
+            # Check for keyboard input
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key == b'1':
+                    print("\n🟢 Moving to Bio position")
+                    ser.write(b"zdeg")
+                elif key == b'2':
+                    print("\n🔵 Moving to Non-Bio position")
+                    ser.write(b"ndeg")
+                elif key == b'3':
+                    print("\n🟡 Moving to Hazardous position")
+                    ser.write(b"odeg")
+                elif key == b'4':
+                    print("\n⚫ Moving to Mixed position")
+                    ser.write(b"tdeg")
+                elif key == b'5':
+                    print("\n🔧 Test Mode")
+                    print("1. Pan Sweep Test")
+                    print("2. Full Sweep Test")
+                    print("3. Back")
+                    while True:
+                        if msvcrt.kbhit():
+                            test_key = msvcrt.getch()
+                            if test_key == b'1':
+                                print("\n🔄 Running Pan Sweep Test")
+                                ser.write(b"sweep1")
+                                break
+                            elif test_key == b'2':
+                                print("\n🔄 Running Full Sweep Test")
+                                ser.write(b"sweep2")
+                                break
+                            elif test_key == b'3':
+                                break
+                elif key == b'6':
+                    print("\n📋 Menu")
+                    print("1. Bio")
+                    print("2. Non-Bio")
+                    print("3. Hazardous")
+                    print("4. Mixed")
+                    print("5. Test Mode")
+                    print("6. This Menu")
+                    print("7. Setup")
+                    print("q. Exit")
+                elif key == b'7':
+                    print("\n⚙️ Setup")
+                    gosort_ips, _ = scan_network()
+                    
+                    if not gosort_ips:
+                        print("\n❌ No GoSort servers found on the network")
+                        continue
+                    
+                    print("\nAvailable GoSort servers:")
+                    for i, ip in enumerate(gosort_ips, 1):
+                        print(f"{i}. {ip}")
+                    
+                    while True:
+                        try:
+                            choice = int(input("\nSelect server number (or 0 to cancel): "))
+                            if choice == 0:
+                                break
+                            if 1 <= choice <= len(gosort_ips):
+                                ip_address = gosort_ips[choice - 1]
+                                if not check_server(ip_address):
+                                    break
+                                
+                                device_identity = input("\nEnter sorter ID (e.g., SORTER001, or Enter to cancel): ").strip()
+                                if not device_identity:
+                                    break
+                                
+                                config = {'ip_address': ip_address, 'sorter_id': device_identity}
+                                save_config(config)
+                                print("\n✅ Configuration saved")
+                                break
+                            print("Invalid selection")
+                        except ValueError:
+                            print("Please enter a number")
+                    print("\nReturning to main menu...")
+                elif key == b'q':
+                    print("\n👋 Exiting...")
+                    break
+            
+            time.sleep(0.1)
     
-    print("🔌 Simulation connection closed")
+    except KeyboardInterrupt:
+        print("\n\n👋 Shutting down...")
+    finally:
+        set_device_offline(ip_address, device_identity)
 
 if __name__ == "__main__":
-    main() 
+    main()

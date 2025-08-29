@@ -15,24 +15,24 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // Array of sorting jokes
 const char* jokes[] = {
-  //"Sorting trash? Its   a waste of time!",
-  //"Why did the can    join recycling?   ",
-  //"To make new      friends!           ",
-  //"Im not trashy,    Im recyclable!    ",
-  //"Refuse to waste!                    ",
-  //"Keep calm and     sort on!          ",
-  //"Time to sort      things out!       ",
-  //"Waste wars: A new hope!             ",
-  "Sort your trash properly, or get the BIN Laden!!!"
+  "Sorting trash? Its   a waste of time!",
+  "Why did the can    join recycling?   ",
+  "To make new      friends!           ",
+  "Im not trashy,    Im recyclable!    ",
+  "Refuse to waste!                    ",
+  "Keep calm and     sort on!          ",
+  "Time to sort      things out!       ",
+  "Waste wars: A new hope!             ",
+  "Sort properly, or get the BIN Laden!"
 };
 const int NUM_JOKES = 8;
 
 // Servo positions (must be between 0 and 180)
 const int neutralPos = 90;    // D8 neutral position
-const int zDegPos = 180;   // 180 degrees
-const int nDegPos = 90;  // 90 degrees
-const int oDegPos = 0; // 0 degrees
-const int tiltNeutralPos = 84;  // D9 neutral position
+const int nbioPos = 0;
+const int bioPos = 90;
+const int recycPos = 180;     // was 270 – corrected to valid servo range
+const int tiltNeutralPos = 97;  // D9 neutral position
 
 void setup() {
   rotateServo.attach(8);
@@ -124,7 +124,7 @@ void setup() {
   lcd.print("Initializing...");
 
   // Sweep test with LCD output
-  rotateServo.write(zDegPos);
+  rotateServo.write(nbioPos);
   lcd.setCursor(0, 1);
   lcd.print("Non-Biodegradable");
   delay(1000);
@@ -134,14 +134,14 @@ void setup() {
   lcd.print("Neutral           ");
   delay(1000);
 
-  rotateServo.write(nDegPos);
+  rotateServo.write(bioPos);
   lcd.setCursor(0, 1);
   lcd.print("Biodegradable     ");
   delay(1000);
 
-  rotateServo.write(oDegPos);
+  rotateServo.write(recycPos);
   lcd.setCursor(0, 1);
-  lcd.print("Hazardous         ");
+  lcd.print("Recyclable        ");
   delay(1000);
 
   rotateServo.write(neutralPos);
@@ -186,23 +186,19 @@ void loop() {
 
     if (inChar == '\n' || inChar == '\r') {
       inputString.trim();
-      // Normalize aliases for trash types
-      if (inputString == "bio") inputString = "zdeg";
-      else if (inputString == "nbio") inputString = "ndeg";
-      else if (inputString == "recyc" || inputString == "hazardous") inputString = "odeg";
       isSorting = !maintenanceMode; // Only set sorting flag if not in maintenance mode
 
-      if (inputString == "zdeg") {
+      if (inputString == "nbio") {
         lcd.setCursor(0, 0);
         lcd.print("Sorting:          ");
         lcd.setCursor(0, 1);
         lcd.print("Non-Biodegradable");
 
-        rotateServo.write(zDegPos);  // D8 rotate
+        rotateServo.write(nbioPos);  // D8 rotate
         delay(500);
         tiltServo.write(150);    // D9 tilt
         delay(500);
-        tiltServo.write(tiltNeutralPos);     // D9 back to neutral
+        tiltServo.write(tiltNeutralPos);     // D9 back to neutral (85 yung sweet spot, tsaka na pag nalangisan na yung tilter, stalling kasi baka masunog)
         delay(500);
         rotateServo.write(neutralPos);  // D8 back to neutral
         delay(500);
@@ -210,56 +206,40 @@ void loop() {
         Serial.println("Moved to non-biodegradable position");
         Serial.println("ready");
       } 
-      else if (inputString == "ndeg") {
-        // Tilt-only: do not rotate D8, just tilt D9 to 150° and back
+      else if (inputString == "bio") {
         lcd.setCursor(0, 0);
-        lcd.print("Tilting D9:       ");
+        lcd.print("Sorting:          ");
         lcd.setCursor(0, 1);
-        lcd.print("150 degrees       ");
+        lcd.print("Biodegradable     ");
 
-        tiltServo.write(150);
+        rotateServo.write(bioPos);   // D8 rotate
         delay(500);
-        tiltServo.write(tiltNeutralPos);
+        tiltServo.write(150);    // D9 tilt
+        delay(500);
+        tiltServo.write(tiltNeutralPos);     // D9 back to neutral (85 yung sweet spot, tsaka na pag nalangisan na yung tilter, stalling kasi baka masunog)
+        delay(500);
+        rotateServo.write(neutralPos);  // D8 back to neutral
         delay(500);
 
-        Serial.println("Tilted D9 to 150 degrees");
+        Serial.println("Moved to biodegradable position");
         Serial.println("ready");
       } 
-      else if (inputString == "odeg") {
+      else if (inputString == "recyc") {
         lcd.setCursor(0, 0);
         lcd.print("Sorting:          ");
         lcd.setCursor(0, 1);
-        lcd.print("Hazardous         ");
+        lcd.print("Recyclable        ");
 
-        rotateServo.write(oDegPos); // D8 rotate
+        rotateServo.write(recycPos); // D8 rotate
         delay(500);
         tiltServo.write(150);    // D9 tilt
         delay(500);
-        tiltServo.write(tiltNeutralPos);     // D9 back to neutral
+        tiltServo.write(tiltNeutralPos);     // D9 back to neutral (85 yung sweet spot, tsaka na pag nalangisan na yung tilter, stalling kasi baka masunog)
         delay(500);
         rotateServo.write(neutralPos);  // D8 back to neutral
         delay(500);
 
-        Serial.println("Moved to hazardous position");
-        Serial.println("ready");
-      }
-      // Mixed (Back position)
-      else if (inputString == "tdeg") {
-        lcd.setCursor(0, 0);
-        lcd.print("Sorting:          ");
-        lcd.setCursor(0, 1);
-        lcd.print("Mixed             ");
-
-        rotateServo.write(oDegPos); // D8 rotate to back
-        delay(500);
-        tiltServo.write(150);    // D9 tilt
-        delay(500);
-        tiltServo.write(tiltNeutralPos);     // D9 back to neutral
-        delay(500);
-        rotateServo.write(neutralPos);  // D8 back to neutral
-        delay(500);
-
-        Serial.println("Moved to mixed position");
+        Serial.println("Moved to recyclable position");
         Serial.println("ready");
       }
       // Maintenance mode commands
@@ -311,11 +291,11 @@ void loop() {
           lcd.print("Testing...       ");
 
           // Sweep D8 through all positions
-          rotateServo.write(zDegPos);    // Go to non-bio (0°)
+          rotateServo.write(nbioPos);    // Go to non-bio (0°)
           delay(1000);
-          rotateServo.write(nDegPos);     // Go to bio (90°)
+          rotateServo.write(bioPos);     // Go to bio (90°)
           delay(1000);
-          rotateServo.write(oDegPos);   // Go to recyclable (180°)
+          rotateServo.write(recycPos);   // Go to recyclable (180°)
           delay(1000);
           rotateServo.write(neutralPos); // Return to neutral (90°)
           
@@ -334,11 +314,11 @@ void loop() {
           delay(1000);
 
           // Sweep D8 through all positions
-          rotateServo.write(zDegPos);    // Go to non-bio (0°)
+          rotateServo.write(nbioPos);    // Go to non-bio (0°)
           delay(1000);
-          rotateServo.write(nDegPos);     // Go to bio (90°)
+          rotateServo.write(bioPos);     // Go to bio (90°)
           delay(1000);
-          rotateServo.write(oDegPos);   // Go to recyclable (180°)
+          rotateServo.write(recycPos);   // Go to recyclable (180°)
           delay(1000);
           
           // Return both to neutral

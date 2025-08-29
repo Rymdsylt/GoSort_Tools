@@ -292,30 +292,36 @@ def main():
     config = load_config()
     if config.get('sorter_id') is None:
         print("\nFirst time setup - Sorter Identity Configuration")
-        while True:
-            sorter_id = input("Enter Sorter Identity (e.g., Sorter1): ")
-            is_duplicate, status = is_identity_duplicate(ip_address, sorter_id)
-            if is_duplicate:
-                if status == "waiting":
-                    print("Identical Identity Found in waiting list, reenter")
-                elif status == "registered":
-                    print("Identical Identity Found in registered devices, reenter")
-                continue
-            config['sorter_id'] = sorter_id
-            save_config(config)
-            break
+        sorter_id = input("Enter Sorter Identity (e.g., Sorter1): ")
+        config['sorter_id'] = sorter_id
+        save_config(config)
     
     # Fetch mapping from backend
     mapping_url = f"http://{ip_address}/GoSort_Web/gs_DB/save_sorter_mapping.php?device_identity={config['sorter_id']}"
     try:
         resp = requests.get(mapping_url)
-        mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
+        mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'hazardous', 'tdeg': 'mixed'})
     except Exception as e:
         print(f"Warning: Could not fetch mapping, using default. {e}")
-        mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
+        mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'hazardous', 'tdeg': 'mixed'}
+    
+    # After getting identity accepted, set default mapping if not exists
+    try:
+        # Set initial mapping
+        mapping_data = {
+            'device_identity': config['sorter_id'],
+            'zdeg': 'bio',
+            'ndeg': 'nbio',
+            'odeg': 'hazardous',
+            'tdeg': 'mixed'
+        }
+        requests.post(mapping_url, json=mapping_data)
+    except Exception as e:
+        print(f"Warning: Could not set default mapping. {e}")
+    
     # For menu display: get the order and labels
-    menu_order = [('zdeg', mapping['zdeg']), ('ndeg', mapping['ndeg']), ('odeg', mapping['odeg'])]
-    trash_labels = {'bio': 'Biodegradable', 'nbio': 'Non-Biodegradable', 'recyc': 'Recyclable'}
+    menu_order = [('zdeg', mapping['zdeg']), ('ndeg', mapping['ndeg']), ('odeg', mapping['odeg']), ('tdeg', mapping['tdeg'])]
+    trash_labels = {'bio': 'Biodegradable', 'nbio': 'Non-Biodegradable', 'hazardous': 'Hazardous', 'mixed': 'Mixed'}
 
     print("\nRequesting device registration with the server...")
     dots_thread = None
@@ -630,12 +636,25 @@ def main():
                     os.remove('gosort_config.json')
                 print("✅ All configuration cleared. Please restart the application.")
                 break
-            elif choice in ['1', '2', '3']:
+            elif choice in ['1', '2', '3', '4']:
                  idx = int(choice) - 1
                  if idx < 0 or idx >= len(menu_order):
-                     print("Invalid choice.")
-                     continue
-                 trash_type = menu_order[idx][1]
+                     if choice == '4':
+                         command = 'tdeg'
+                         trash_type = 'mixed'
+                     else:
+                         print("Invalid choice.")
+                         continue
+                 else:
+                     trash_type = menu_order[idx][1]
+                     # Find the servo command for this trash type
+                     command = None
+                     for servo_key, ttype in mapping.items():
+                         if ttype == trash_type:
+                             command = servo_key
+                             break
+                     if not command:
+                         command = 'zdeg'  # Default fallback
                  # Find the servo command for this trash type
                  command = None
                  for servo_key, ttype in mapping.items():
@@ -667,7 +686,7 @@ def main():
                  
                  print_menu()
             elif choice not in ['\r', '\n']:  # Ignore enter key presses
-                print("\nInvalid choice. Please choose 1, 2, 3, r for IP config, i for Identity config, or q to quit")
+                print("\nInvalid choice. Please choose 1, 2, 3, 4, r for IP config, i for Identity config, or q to quit")
         
         # Add a small delay to prevent the loop from running too fast
         time.sleep(0.1)

@@ -705,10 +705,10 @@ def main():
     mapping_url = f"http://{ip_address}/GoSort_Web/gs_DB/save_sorter_mapping.php?device_identity={sorter_id}"
     try:
         resp = requests.get(mapping_url)
-        mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
+        mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'hazardous'})
     except Exception as e:
         print(f"Warning: Could not fetch mapping, using default. {e}")
-        mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
+        mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'hazardous'}
     # Reverse mapping: trash type -> servo command
     trash_to_cmd = {v: k for k, v in mapping.items()}
 
@@ -747,10 +747,10 @@ def main():
                 # Re-fetch mapping after maintenance mode
                 try:
                     resp = requests.get(mapping_url)
-                    mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
+                    mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'hazardous'})
                 except Exception as e:
                     print(f"Warning: Could not fetch mapping, using default. {e}")
-                    mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
+                    mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'hazardous'}
                 # Update reverse mapping
                 trash_to_cmd = {v: k for k, v in mapping.items()}
             last_maintenance_status = current_maintenance
@@ -799,7 +799,7 @@ def main():
                             if command_handler is not None:
                                 if command_handler.command_queue.empty():
                                     # For maintenance commands that require maintenance mode, send maintmode first
-                                    if command in ['unclog', 'sweep1', 'sweep2']:
+                                    if command in ['unclog', 'sweep1', 'sweep2', 'mixed']:
                                         print("Sending maintmode command to enable maintenance mode...")
                                         command_handler.arduino.write("maintmode\n".encode())
                                         time.sleep(0.5)  # Give Arduino time to process maintmode command
@@ -810,7 +810,10 @@ def main():
                                                 print(f"🟢 Arduino Response: {response}")
                                 
                                     print(f"Sending to Arduino: {command}")
-                                    command_handler.arduino.write(f"{command}\n".encode())
+                                    if command == 'mixed':
+                                        command_handler.arduino.write(b"tdeg\n")
+                                    else:
+                                        command_handler.arduino.write(f"{command}\n".encode())
                                     
                                     # Wait longer for maintenance commands that take more time
                                     if command == 'unclog':
@@ -826,7 +829,7 @@ def main():
                                             print(f"🟢 Arduino Response: {response}")
                                     
                                     # For maintenance commands that require maintenance mode, send maintend after
-                                    if command in ['unclog', 'sweep1', 'sweep2']:
+                                    if command in ['unclog', 'sweep1', 'sweep2', 'mixed']:
                                         print("Sending maintend command to exit maintenance mode...")
                                         command_handler.arduino.write("maintend\n".encode())
                                         time.sleep(0.5)  # Give Arduino time to process maintend command
@@ -852,6 +855,18 @@ def main():
                                                 )
                                             except Exception as e:
                                                 print(f"\n⚠️ Error recording sorting: {e}")
+                                    elif command == 'mixed':
+                                        try:
+                                            requests.post(
+                                                f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
+                                                json={
+                                                    'device_identity': sorter_id,
+                                                    'trash_type': 'mixed',
+                                                    'is_maintenance': True
+                                                }
+                                            )
+                                        except Exception as e:
+                                            print(f"\n⚠️ Error recording mixed sorting: {e}")
                                     
                                     # Mark command as executed
                                     requests.post(
@@ -893,9 +908,9 @@ def main():
 
                     # Process detections with high confidence
                     if conf > 0.78:
-                        # Determine trash type (bio, nbio, recyc)
+                        # Determine trash type (bio, nbio, hazardous)
                         if class_name.lower() in ['plastic', 'metal', 'glass', 'botol_kaca', 'botol_kaleng']:
-                            trash_type = 'recyc'
+                            trash_type = 'hazardous'
                         elif class_name.lower() in ['paper', 'food', 'organic']:
                             trash_type = 'bio'
                         else:
