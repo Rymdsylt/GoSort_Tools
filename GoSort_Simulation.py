@@ -216,24 +216,6 @@ def restart_program():
     python = sys.executable
     os.execl(python, python, *sys.argv)
 
-def is_identity_duplicate(ip_address, identity):
-    try:
-        print("Checking for identical identity...")
-        url = f"http://{ip_address}/GoSort_Web/gs_DB/check_duplicate_identity.php"
-        response = requests.post(url, json={'identity': identity}, headers={'Content-Type': 'application/json'})
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('success'):
-                status = data.get('status')
-                if status == 'waiting':
-                    return True, "waiting"
-                elif status == 'registered':
-                    return True, "registered"
-        return False, None
-    except Exception as e:
-        print(f"Error checking duplicate identity: {e}")
-        return False, None
-
 def remove_from_waiting_devices(ip_address, device_identity):
     try:
         url = f"http://{ip_address}/GoSort_Web/gs_DB/remove_waiting_device.php"

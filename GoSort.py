@@ -272,18 +272,9 @@ def main():
     config = load_config()
     if config.get('sorter_id') is None:
         print("\nFirst time setup - Sorter Identity Configuration")
-        while True:
-            sorter_id = input("Enter Sorter Identity (e.g., Sorter1): ")
-            is_duplicate, status = is_identity_duplicate(ip_address, sorter_id)
-            if is_duplicate:
-                if status == "waiting":
-                    print("Identical Identity Found in waiting list, reenter")
-                elif status == "registered":
-                    print("Identical Identity Found in registered devices, reenter")
-                continue
-            config['sorter_id'] = sorter_id
-            save_config(config)
-            break
+        sorter_id = input("Enter Sorter Identity (e.g., Sorter1): ")
+        config['sorter_id'] = sorter_id
+        save_config(config)
     
     # Fetch mapping from backend
     mapping_url = f"http://{ip_address}/GoSort_Web/gs_DB/save_sorter_mapping.php?device_identity={config['sorter_id']}"
