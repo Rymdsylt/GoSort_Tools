@@ -246,24 +246,6 @@ def restart_program():
     python = sys.executable
     os.execl(python, python, *sys.argv)
 
-def is_identity_duplicate(ip_address, identity):
-    try:
-        print("Checking for identical identity...")
-        url = f"http://{ip_address}/GoSort_Web/gs_DB/check_duplicate_identity.php"
-        response = requests.post(url, json={'identity': identity}, headers={'Content-Type': 'application/json'})
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('success'):
-                status = data.get('status')
-                if status == 'waiting':
-                    return True, "waiting"
-                elif status == 'registered':
-                    return True, "registered"
-        return False, None
-    except Exception as e:
-        print(f"Error checking duplicate identity: {e}")
-        return False, None
-
 def remove_from_waiting_devices(ip_address, device_identity):
     try:
         url = f"http://{ip_address}/GoSort_Web/gs_DB/remove_waiting_device.php"
@@ -370,18 +352,9 @@ def main():
     # Then get identity configuration
     if config.get('sorter_id') is None:
         print("\nFirst time setup - Sorter Identity Configuration")
-        while True:
-            sorter_id = input("Enter Sorter Identity (e.g., Sorter1): ")
-            is_duplicate, status = is_identity_duplicate(ip_address, sorter_id)
-            if is_duplicate:
-                if status == "waiting":
-                    print("Identical Identity Found in waiting list, reenter")
-                elif status == "registered":
-                    print("Identical Identity Found in registered devices, reenter")
-                continue
-            config['sorter_id'] = sorter_id
-            save_config(config)
-            break
+        sorter_id = input("Enter Sorter Identity (e.g., Sorter1): ")
+        config['sorter_id'] = sorter_id
+        save_config(config)
     sorter_id = config.get('sorter_id')
     print(f"Using Sorter Identity: {sorter_id}")
     
