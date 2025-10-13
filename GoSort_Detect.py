@@ -19,6 +19,13 @@ import cpuinfo
 def is_maintenance_mode():
     return os.path.exists('python_maintenance_mode.txt')
 
+def load_categories():
+    categories_file = 'categories.json'
+    if os.path.exists(categories_file):
+        with open(categories_file, 'r') as f:
+            return json.load(f)
+    return {}
+
 def load_config():
     config_file = 'gosort_config.json'
     if os.path.exists(config_file):
@@ -290,6 +297,32 @@ def check_server_connection(ip_address):
     except:
         return False
 
+def map_category_to_command(category, mapping):
+    # Map categories to the standard waste types used in the mapping
+    category_to_type = {
+        'bio': 'bio',
+        'hazardous': 'nbio',  # Hazardous waste goes to non-bio bin
+        'recyclable': 'recyc',
+        'non_bio': 'nbio',
+        'mixed': 'mixed'
+    }
+    
+    waste_type = category_to_type.get(category, 'nbio')  # Default to non-bio if category not found
+    
+    # Find the servo command for this waste type
+    for cmd, typ in mapping.items():
+        if typ == waste_type:
+            return cmd
+    
+    # Default commands if not found in mapping
+    default_commands = {
+        'bio': 'zdeg',
+        'nbio': 'ndeg',
+        'recyc': 'odeg',
+        'mixed': 'mdeg'
+    }
+    return default_commands.get(waste_type, 'ndeg')  # Default to ndeg if no mapping found
+
 def check_maintenance_mode(ip_address, device_identity):
     try:
         url = f"http://{ip_address}/GoSort_Web/gs_DB/check_maintenance.php"
@@ -523,16 +556,15 @@ def main():
         device_name = cpuinfo.get_cpu_info()['brand_raw']
         print(f"CPU: {device_name}")
     
-    model = YOLO('best.pt')
+    model = YOLO('best885.pt')
     if device.type == 'cuda':
         model.to('cuda')
     elif 'DirectML' in backend:
         model.to(device)
 
-    model.conf = 0.78
-    model.iou = 0.45
+    model.conf = 0.50  
+    model.iou = 0.50   
 
-    # Connect to Arduino regardless of device mode, searching all COM ports
     try:
         import serial
         import serial.tools.list_ports
@@ -541,19 +573,19 @@ def main():
         arduino_connected = False
         candidate_ports = list(serial.tools.list_ports.comports())
         for port in candidate_ports:
-            if 'Arduino' in port.description or '2560' in port.description or True:  # Try all ports, prefer Arduino/2560
+            if 'Arduino' in port.description or '2560' in port.description or True: 
                 try:
                     arduino = serial.Serial(port.device, 19200, timeout=1)
-                    time.sleep(2)  # Wait for Arduino to reset after serial connection
+                    time.sleep(2)  
                     print(f"Connected to Arduino on {port.device} ({port.description})")
-                    # Send gosort_ready directly through serial
+
                     arduino.write(b'gosort_ready\n')
                     print("Sent gosort_ready signal")
-                    # Wait for initialization response
+ 
                     while arduino.in_waiting:
                         response = arduino.readline().decode().strip()
                         print(f"Arduino: {response}")
-                    # Create command handler after initialization
+            
                     command_handler = CommandHandler(arduino)
                     arduino_connected = True
                     def check_arduino_connection():
@@ -569,7 +601,7 @@ def main():
                             print(f"\n❌ Arduino connection lost: {e}")
                             arduino_connected = False
                             return False
-                    break  # Stop after first successful connection
+                    break  #
                 except Exception as e:
                     print(f"Failed to connect to {port.device}: {e}")
                     if arduino:
@@ -609,7 +641,7 @@ def main():
     fps_time = time.time()
     frame_count = 0
 
-    # Fetch mapping from backend
+
     mapping_url = f"http://{ip_address}/GoSort_Web/gs_DB/save_sorter_mapping.php?device_identity={sorter_id}"
     try:
         resp = requests.get(mapping_url)
@@ -617,62 +649,61 @@ def main():
     except Exception as e:
         print(f"Warning: Could not fetch mapping, using default. {e}")
         mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
-    # Reverse mapping: trash type -> servo command
+
     trash_to_cmd = {v: k for k, v in mapping.items()}
 
     while True:
         frame = stream.read()
         frame_count += 1
 
-        # Handle heartbeat
+
         current_time = time.time()
         if current_time - last_heartbeat >= heartbeat_interval:
-            # Only send heartbeat if Arduino is still connected
+
             if arduino_connected and check_arduino_connection():
                 if send_heartbeat(ip_address, sorter_id):
                     last_heartbeat = current_time
                 else:
-                    print("\n⚠️ Failed to send heartbeat")
-                    # Remove from waiting devices if heartbeat fails
+                    print("\n Failed to send heartbeat")
+                 
                     remove_from_waiting_devices(ip_address, sorter_id)
             else:
-                # Arduino disconnected, stop sending heartbeats
-                print("\n⚠️ Arduino disconnected - stopping heartbeats")
-                # Remove from waiting devices since Arduino is disconnected
+          
+                print("\n Arduino disconnected - stopping heartbeats")
+
                 remove_from_waiting_devices(ip_address, sorter_id)
                 break
 
-        # Check maintenance mode periodically
+
         current_maintenance = check_maintenance_mode(ip_address, sorter_id)
         
-        # If maintenance status changed, notify user
+
         if current_maintenance != last_maintenance_status:
             if current_maintenance:
-                print("\n🔧 Entering maintenance mode - Detection paused")
+                print("\n Entering maintenance mode - Detection paused")
                 print("Listening for maintenance commands...")
             else:
-                print("\n✅ Exiting maintenance mode - Detection resumed")
-                # Re-fetch mapping after maintenance mode
+                print("\n Exiting maintenance mode - Detection resumed")
+
                 try:
                     resp = requests.get(mapping_url)
                     mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
                 except Exception as e:
                     print(f"Warning: Could not fetch mapping, using default. {e}")
                     mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
-                # Update reverse mapping
+
                 trash_to_cmd = {v: k for k, v in mapping.items()}
             last_maintenance_status = current_maintenance
 
-        # If in maintenance mode, check for and execute maintenance commands
         if current_maintenance:
-            # Add red maintenance mode text
+
             cv2.putText(frame, "MAINTENANCE MODE - Detection Paused", (10, 110), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
-            # Check Arduino connection before processing maintenance commands
+
             if not arduino_connected or not check_arduino_connection():
-                print("\n⚠️ Arduino disconnected - cannot execute maintenance commands")
-                # Skip YOLOv8 inference during maintenance
+                print("\n Arduino disconnected - cannot execute maintenance commands")
+
                 results = []
             else:
                 try:
@@ -688,10 +719,10 @@ def main():
                             print(f"\n📡 Received maintenance command from server: {command}")
                             print(f"Current mapping: {mapping}")
                             
-                            # Shutdown logic
+              
                             if command == 'shutdown':
                                 print("\n⚠️ Shutdown command received. Shutting down computer...")
-                                # Mark command as executed before shutdown
+            
                                 try:
                                     requests.post(
                                         f"http://{ip_address}/GoSort_Web/gs_DB/mark_command_executed.php",
@@ -703,48 +734,48 @@ def main():
                                 time.sleep(5)
                                 break
                             
-                            # Send command to Arduino if available
+              
                             if command_handler is not None:
                                 if command_handler.command_queue.empty():
-                                    # For maintenance commands that require maintenance mode, send maintmode first
+
                                     if command in ['unclog', 'sweep1', 'sweep2']:
                                         print("Sending maintmode command to enable maintenance mode...")
                                         command_handler.arduino.write("maintmode\n".encode())
-                                        time.sleep(0.5)  # Give Arduino time to process maintmode command
+                                        time.sleep(0.5) 
                                         
                                         while command_handler.arduino.in_waiting:
                                             response = command_handler.arduino.readline().decode().strip()
                                             if response:
-                                                print(f"🟢 Arduino Response: {response}")
+                                                print(f" Arduino Response: {response}")
                                 
                                     print(f"Sending to Arduino: {command}")
                                     command_handler.arduino.write(f"{command}\n".encode())
                                     
-                                    # Wait longer for maintenance commands that take more time
+                      
                                     if command == 'unclog':
-                                        time.sleep(6)  # 3s hold + 2s movement + 1s buffer
+                                        time.sleep(6) 
                                     elif command in ['sweep1', 'sweep2']:
-                                        time.sleep(5)  # 4s sweep + 1s buffer
+                                        time.sleep(5)
                                     else:
                                         time.sleep(0.1)
                                     
                                     while command_handler.arduino.in_waiting:
                                         response = command_handler.arduino.readline().decode().strip()
                                         if response:
-                                            print(f"🟢 Arduino Response: {response}")
+                                            print(f"Arduino Response: {response}")
                                     
-                                    # For maintenance commands that require maintenance mode, send maintend after
+                             
                                     if command in ['unclog', 'sweep1', 'sweep2']:
                                         print("Sending maintend command to exit maintenance mode...")
                                         command_handler.arduino.write("maintend\n".encode())
-                                        time.sleep(0.5)  # Give Arduino time to process maintend command
+                                        time.sleep(0.5) 
                                         
                                         while command_handler.arduino.in_waiting:
                                             response = command_handler.arduino.readline().decode().strip()
                                             if response:
                                                 print(f"🟢 Arduino Response: {response}")
                                     
-                                    # Record the sorting operation if it's a sorting command
+                                 
                                     if command in ['ndeg', 'zdeg', 'odeg']:
                                         # Find the trash type for this servo command using mapping
                                         trash_type = mapping.get(command)
@@ -790,27 +821,36 @@ def main():
                     x1, y1, x2, y2 = box.xyxy[0].astype(int)
                     conf = box.conf[0]
                     class_id = int(box.cls[0])
-                    class_name = model.names[class_id]
+                    detected_item = model.names[class_id]
+                    
+                    # Map the detected item to its category using categories.json
+                    categories = load_categories()
+                    class_name = None
+                    for category, items in categories.items():
+                        if detected_item.lower() in [item.lower() for item in items]:
+                            class_name = category
+                            break
+                    
+                    if class_name is None:
+                        class_name = "non_bio"  # Default category if not found
 
-                    # Draw bounding box and label (properly indented inside the box loop)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    label = f"{class_name} {conf:.2f}"
-                    cv2.putText(frame, label, (x1, y1 - 10),
+                    # Draw bounding box and label with 75% opacity
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(overlay, f"{detected_item} {conf:.2f}", (x1, y1 - 10),
                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    # Apply the overlay with 75% opacity
+                    cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
 
                     # Process detections with high confidence
-                    if conf > 0.78:
-                        # Determine trash type (bio, nbio, recyc)
-                        if class_name.lower() in ['plastic', 'metal', 'glass', 'botol_kaca', 'botol_kaleng']:
-                            trash_type = 'recyc'
-                        elif class_name.lower() in ['paper', 'food', 'organic']:
-                            trash_type = 'bio'
-                        else:
-                            trash_type = 'nbio'
-                        command = trash_to_cmd.get(trash_type, 'zdeg')
+                    if conf > 0.50:  # 50% confidence threshold
+                        # Map the detected category to a servo command
+                        command = map_category_to_command(class_name, mapping)
+                        # Get the corresponding trash type from the mapping
+                        trash_type = mapping.get(command, 'nbio')
                         
                         try:
-                            print(f"✅ Detection: {class_name} ({conf:.2f})")
+                            print(f"✅ Detection: {detected_item} ({conf:.2f}) - Category: {class_name}")
                             
                             # Record sorting operation
                             url = f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php"

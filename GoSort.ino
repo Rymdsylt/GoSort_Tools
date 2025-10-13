@@ -2,8 +2,26 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
+// Servo pins
 Servo rotateServo;  // Servo for rotation (D8)
 Servo tiltServo;    // Servo for tilting (D9)
+
+// Ultrasonic sensor pins for bin fullness
+const int TRIG_PIN_1 = 2;  // Non-biodegradable bin sensor
+const int ECHO_PIN_1 = 3;
+const int TRIG_PIN_2 = 4;  // Biodegradable bin sensor
+const int ECHO_PIN_2 = 5;
+const int TRIG_PIN_3 = 6;  // Recyclable bin sensor
+const int ECHO_PIN_3 = 7;
+const int TRIG_PIN_4 = 10; // Extra bin sensor
+const int ECHO_PIN_4 = 11;
+
+// Variables for sensor timing
+const unsigned long SENSOR_INTERVAL = 700; // 0.7 seconds in milliseconds
+unsigned long lastSensorReadTime;  // Will be initialized after booting
+int currentSensor;                // Will be initialized after booting
+bool sensorsActive = false;       // Flag to control sensor activation
+
 String inputString = "";
 bool isSorting = false;
 bool maintenanceMode = false;
@@ -35,8 +53,20 @@ const int recycPos = 180;     // was 270 – corrected to valid servo range
 const int tiltNeutralPos = 97;  // D9 neutral position
 
 void setup() {
+  // Initialize servos
   rotateServo.attach(8);
   tiltServo.attach(9);
+  
+  // Initialize ultrasonic sensor pins
+  pinMode(TRIG_PIN_1, OUTPUT);
+  pinMode(ECHO_PIN_1, INPUT);
+  pinMode(TRIG_PIN_2, OUTPUT);
+  pinMode(ECHO_PIN_2, INPUT);
+  pinMode(TRIG_PIN_3, OUTPUT);
+  pinMode(ECHO_PIN_3, INPUT);
+  pinMode(TRIG_PIN_4, OUTPUT);
+  pinMode(ECHO_PIN_4, INPUT);
+  
   Serial.begin(19200);
   lcd.begin(16, 2);  
   lcd.backlight();
@@ -162,15 +192,75 @@ void setup() {
   lcd.print("Awaiting Trash ");
 
   Serial.println("Initialization complete - Ready for sorting!");
+  
+  // Initialize sensor variables after booting
+  lastSensorReadTime = millis();
+  currentSensor = 1;
+  sensorsActive = true;  // Activate sensors
 }
 
 
 
 
+// Function to measure distance from a specific sensor
+long measureDistance(int trigPin, int echoPin) {
+  // Clear the trigger pin
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  
+  // Send 10µs pulse
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  
+  // Measure the response
+  long duration = pulseIn(echoPin, HIGH);
+  
+  // Calculate distance in centimeters
+  return duration * 0.034 / 2;
+}
+
 void loop() {
+  unsigned long currentTime = millis();
+  
+  // Check bin fullness every SENSOR_INTERVAL (0.7 seconds) only if sensors are active
+  if (sensorsActive && currentTime - lastSensorReadTime >= SENSOR_INTERVAL) {
+    int distance = 0;
+    String binName = "";
+    
+    // Select which sensor to read based on the current rotation
+    switch(currentSensor) {
+      case 1:
+        distance = measureDistance(TRIG_PIN_1, ECHO_PIN_1);
+        binName = "Non-Bio";
+        break;
+      case 2:
+        distance = measureDistance(TRIG_PIN_2, ECHO_PIN_2);
+        binName = "Bio";
+        break;
+      case 3:
+        distance = measureDistance(TRIG_PIN_3, ECHO_PIN_3);
+        binName = "Recyclable";
+        break;
+      case 4:
+        distance = measureDistance(TRIG_PIN_4, ECHO_PIN_4);
+        binName = "Extra";
+        break;
+    }
+    
+    // Send bin fullness data over Serial
+    Serial.print("bin_fullness:");
+    Serial.print(binName);
+    Serial.print(":");
+    Serial.println(distance);
+    
+    // Update timing and move to next sensor
+    lastSensorReadTime = currentTime;
+    currentSensor = (currentSensor % 4) + 1;
+  }
+
   // Handle maintenance mode scrolling text
   if (maintenanceMode) {
-    unsigned long currentTime = millis();
     if (currentTime - lastMaintenanceScrollTime >= 300) { // Scroll every 300ms
       String maintText = "Maintenance Mode... Standby   ";
       lcd.setCursor(0, 0);

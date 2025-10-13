@@ -1,0 +1,29 @@
+{
+    "bio": [
+        "food",
+        "fruit",
+        "paper",
+        "paper cup",
+        "paper plate"
+    ],
+    "recyclable": [
+        "can",
+        "plastic container",
+        "plastic cup",
+        "pet bottle",
+        "plastic bag",
+        "paper"
+    ],
+    "hazardous": [
+        "glass",
+        "face mask",
+        "light bulb"
+    ],
+    "non_bio": [
+        "plastic utensil",
+        "food container",
+        "plastic spoon",
+        "wrappers",
+        "pen"
+    ]
+}
