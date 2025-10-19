@@ -176,7 +176,7 @@ def connect_to_arduino(port):
 
         ser = serial.Serial(
             port=port,
-            baudrate=19200,
+            baudrate=115200,
             timeout=1,
             write_timeout=1,
             exclusive=True
@@ -262,6 +262,37 @@ def remove_from_waiting_devices(ip_address, device_identity):
         print(f"\n❌ Error removing from waiting devices: {e}")
         return False
 
+def process_bin_fullness(data, ip_address, device_identity):
+    # Format is "bin_fullness:BinName:Distance"
+    try:
+        parts = data.split(':')
+        if len(parts) == 3 and parts[0] == 'bin_fullness':
+            bin_name = parts[1]
+            distance = int(parts[2])
+            
+            # Send data to database using form data
+            try:
+                response = requests.post(
+                    f"http://{ip_address}/GoSort_Web/gs_DB/update_bin_fullness.php",
+                    data={
+                        'device_identity': device_identity,
+                        'bin_name': bin_name,
+                        'distance': distance
+                    }
+                )
+                
+                if response.status_code == 200 and "Record inserted" in response.text:
+                    # Success - show bin fullness and database status
+                    print(f"\r✅ Bin Fullness - {bin_name}: {distance}cm (Saved to DB)", end="", flush=True)
+                else:
+                    # Error - show what went wrong
+                    print(f"\r❌ Bin Fullness - {bin_name}: {distance}cm (DB Error: {response.text})", end="", flush=True)
+            except Exception as e:
+                print(f"\r❌ Bin Fullness - {bin_name}: {distance}cm (Error: {e})", end="", flush=True)
+                
+    except Exception as e:
+        print(f"\nError processing bin fullness data: {e}")
+
 def main():
     config = load_config()
     # First get IP address
@@ -276,17 +307,43 @@ def main():
         config['sorter_id'] = sorter_id
         save_config(config)
     
+    # Define default mapping
+    default_mapping = {
+        'zdeg': 'bio',
+        'ndeg': 'nbio',
+        'odeg': 'recyc',
+        'mdeg': 'mixed'
+    }
+    
     # Fetch mapping from backend
     mapping_url = f"http://{ip_address}/GoSort_Web/gs_DB/save_sorter_mapping.php?device_identity={config['sorter_id']}"
     try:
         resp = requests.get(mapping_url)
-        mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
+        server_mapping = resp.json().get('mapping', {})
+        # Update default mapping with server values, keeping defaults for missing keys
+        mapping = default_mapping.copy()
+        mapping.update(server_mapping)
     except Exception as e:
         print(f"Warning: Could not fetch mapping, using default. {e}")
-        mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
+        mapping = default_mapping
     # For menu display: get the order and labels
-    menu_order = [('zdeg', mapping['zdeg']), ('ndeg', mapping['ndeg']), ('odeg', mapping['odeg'])]
-    trash_labels = {'bio': 'Biodegradable', 'nbio': 'Non-Biodegradable', 'recyc': 'Recyclable'}
+    # Create menu order - only include items that exist in mapping
+    menu_order = []
+    if 'zdeg' in mapping:
+        menu_order.append(('zdeg', mapping['zdeg']))
+    if 'ndeg' in mapping:
+        menu_order.append(('ndeg', mapping['ndeg']))
+    if 'odeg' in mapping:
+        menu_order.append(('odeg', mapping['odeg']))
+    if 'mdeg' in mapping:
+        menu_order.append(('mdeg', mapping['mdeg']))
+        
+    trash_labels = {
+        'bio': 'Biodegradable',
+        'nbio': 'Non-Biodegradable',
+        'recyc': 'Hazardous',
+        'mixed': 'Mixed Waste'
+    }
 
     print("\nRequesting device registration with the server...")
     dots_thread = None
@@ -379,7 +436,10 @@ def main():
     while ser.in_waiting:
         response = ser.readline().decode().strip()
         if response:
-            print(f"🟢 Arduino Response: {response}")
+            if response.startswith('bin_fullness:'):
+                process_bin_fullness(response, ip_address, config['sorter_id'])
+            else:
+                print(f"🟢 Arduino Response: {response}")
     
     print("\n✅ Connected to Arduino Mega 2560")
     
@@ -409,6 +469,7 @@ def main():
         for idx, (deg, ttype) in enumerate(menu_order, 1):
             label = trash_labels.get(ttype, ttype)
             print(f"{idx}. {label}")
+        print("4. Mixed")
         print("r. Reconfigure IP")
         print("i. Reconfigure Identity")
         print("c. Clear All Configuration")
@@ -428,6 +489,15 @@ def main():
             # Only send heartbeat if Arduino is still connected
             if arduino_connected and check_arduino_connection():
                 try:
+                    # Process any incoming serial data (including bin fullness)
+                    while ser.in_waiting:
+                        response = ser.readline().decode().strip()
+                        if response:
+                            if response.startswith('bin_fullness:'):
+                                process_bin_fullness(response, ip_address, config['sorter_id'])
+                            else:
+                                print(f"\n🟢 Arduino: {response}")
+                    
                     # Send heartbeat to update last_active
                     requests.post(
                         f"http://{ip_address}/GoSort_Web/gs_DB/verify_sorter.php",
@@ -594,12 +664,16 @@ def main():
                     os.remove('gosort_config.json')
                 print("✅ All configuration cleared. Please restart the application.")
                 break
-            elif choice in ['1', '2', '3']:
+            elif choice in ['1', '2', '3', '4']:
                  idx = int(choice) - 1
-                 if idx < 0 or idx >= len(menu_order):
-                     print("Invalid choice.")
-                     continue
-                 trash_type = menu_order[idx][1]
+                 if choice == '4':
+                     command = 'mdeg'  # Special case for mixed
+                     trash_type = 'mixed'
+                 else:
+                     if idx >= len(menu_order):
+                         print("Invalid choice.")
+                         continue
+                     trash_type = menu_order[idx][1]
                  # Find the servo command for this trash type
                  command = None
                  for servo_key, ttype in mapping.items():
