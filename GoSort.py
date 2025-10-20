@@ -307,18 +307,18 @@ def main():
         config['sorter_id'] = sorter_id
         save_config(config)
     
-    # Define default mapping
+    # Define default mapping for servo control
     default_mapping = {
-        'zdeg': 'bio',
-        'ndeg': 'nbio',
-        'odeg': 'recyc',
-        'mdeg': 'mixed'
+        'zdeg': 'bio',       # Front-left position
+        'ndeg': 'nbio',      # Front-right position
+        'odeg': 'hazardous', # Back-left position
+        'mdeg': 'mixed'      # Back-right position
     }
     
     # Fetch mapping from backend
     mapping_url = f"http://{ip_address}/GoSort_Web/gs_DB/save_sorter_mapping.php?device_identity={config['sorter_id']}"
     try:
-        resp = requests.get(mapping_url)
+        resp = requests.get(mapping_url, timeout=5)
         server_mapping = resp.json().get('mapping', {})
         # Update default mapping with server values, keeping defaults for missing keys
         mapping = default_mapping.copy()
@@ -341,7 +341,7 @@ def main():
     trash_labels = {
         'bio': 'Biodegradable',
         'nbio': 'Non-Biodegradable',
-        'recyc': 'Hazardous',
+        'hazardous': 'Hazardous',
         'mixed': 'Mixed Waste'
     }
 
@@ -443,9 +443,35 @@ def main():
     
     print("\n✅ Connected to Arduino Mega 2560")
     
-    # Track Arduino connection status
+                # Track Arduino connection status
     arduino_connected = True
     
+    # Define servo position assignments based on the mapping
+    # These correspond to the Arduino servo positions:
+    servo_positions = {
+        'zdeg': 22,  # Front-left position
+        'ndeg': 67,  # Front-right position
+        'odeg': 22,  # Back-left position
+        'mdeg': 67   # Back-right position
+    }
+    
+    # Define the command translation based on mapping
+    def get_command_for_type(waste_type, mapping):
+        """Convert a waste type to the appropriate servo command based on mapping"""
+        # First try to find an exact match in the mapping
+        for cmd, mapped_type in mapping.items():
+            if mapped_type == waste_type:
+                return cmd
+        
+        # If no exact match, use defaults based on waste type
+        default_commands = {
+            'bio': 'zdeg',      # Bio goes to front-left
+            'nbio': 'ndeg',     # Non-bio goes to front-right
+            'hazardous': 'odeg', # Hazardous goes to back-left
+            'mixed': 'mdeg'      # Mixed goes to back-right
+        }
+        return default_commands.get(waste_type, 'ndeg')  # Default to front (nbio) if unknown
+
     def check_arduino_connection():
         """Check if Arduino is still connected"""
         nonlocal arduino_connected
@@ -528,12 +554,19 @@ def main():
                 print("\n✅ Exiting maintenance mode - Controls enabled")
                 # Re-fetch mapping after maintenance mode
                 try:
-                    resp = requests.get(mapping_url)
-                    mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
+                    resp = requests.get(mapping_url, timeout=5)
+                    server_mapping = resp.json().get('mapping', {})
+                    # ensure defaults and merge
+                    mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'hazardous', 'mdeg': 'mixed'}
+                    mapping.update(server_mapping)
                 except Exception as e:
                     print(f"Warning: Could not fetch mapping, using default. {e}")
-                    mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
-                menu_order = [('zdeg', mapping['zdeg']), ('ndeg', mapping['ndeg']), ('odeg', mapping['odeg'])]
+                    mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'hazardous', 'mdeg': 'mixed'}
+                # Rebuild menu_order including mdeg
+                menu_order = []
+                for key in ['zdeg', 'ndeg', 'odeg', 'mdeg']:
+                    if key in mapping:
+                        menu_order.append((key, mapping[key]))
                 print_menu()
             last_maintenance_status = current_maintenance
 
@@ -597,7 +630,7 @@ def main():
                                     print(f"🟢 Arduino Response: {response}")
                         
                         # Record the sorting operation if it's a sorting command
-                        if command in ['ndeg', 'zdeg', 'odeg']:
+                        if command in ['ndeg', 'zdeg', 'odeg', 'mdeg']:
                             # Find the trash type for this servo command using mapping
                             trash_type = mapping.get(command)
                             if trash_type:
@@ -665,45 +698,46 @@ def main():
                 print("✅ All configuration cleared. Please restart the application.")
                 break
             elif choice in ['1', '2', '3', '4']:
-                 idx = int(choice) - 1
-                 if choice == '4':
-                     command = 'mdeg'  # Special case for mixed
-                     trash_type = 'mixed'
-                 else:
-                     if idx >= len(menu_order):
-                         print("Invalid choice.")
-                         continue
-                     trash_type = menu_order[idx][1]
-                 # Find the servo command for this trash type
-                 command = None
-                 for servo_key, ttype in mapping.items():
-                     if ttype == trash_type:
-                         command = servo_key
-                         break
-                 if not command:
-                     command = 'zdeg'  # Default fallback
-                 ser.write(f"{command}\n".encode())
-                 print(f"\n🔄 Moving to {command.upper()}...")
-                 time.sleep(0.1)
-                 while ser.in_waiting:
-                     response = ser.readline().decode().strip()
-                     if response:
-                         print(f"🟢 Arduino Response: {response}")
-                 
-                 # Record the sorting operation
-                 try:
-                     requests.post(
-                         f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php",
-                         json={
-                             'device_identity': config['sorter_id'],
-                             'trash_type': trash_type,
-                             'is_maintenance': False
-                         }
-                     )
-                 except Exception as e:
-                     print(f"\n⚠️ Error recording sorting: {e}")
-                 
-                 print_menu()
+                idx = int(choice) - 1
+                if idx < len(menu_order):
+                    degree, trash_type = menu_order[idx]
+                    # Send the corresponding servo command based on the mapping
+                    command = f"{degree}\n"
+                    if command:
+                        try:
+                            ser.write(command.encode())
+                            print(f"\n🔄 Moving servo to sort {trash_labels.get(trash_type, trash_type)} waste...")
+                            
+                            # Record the sorting action
+                            try:
+                                sorting_url = f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php"
+                                response = requests.post(
+                                    sorting_url,
+                                    json={
+                                        'device_identity': config['sorter_id'],
+                                        'trash_type': trash_type,
+                                        'is_maintenance': 0
+                                    }
+                                )
+                                if response.status_code == 200:
+                                    data = response.json()
+                                    if data.get('success'):
+                                        print(f"✅ Recorded sorting: {trash_labels.get(trash_type, trash_type)}")
+                                    else:
+                                        print(f"❌ Failed to record sorting: {data.get('message', 'Unknown error')}")
+                            except Exception as e:
+                                print(f"❌ Error recording sorting: {e}")
+                        except Exception as e:
+                            print(f"❌ Error sending command to Arduino: {e}")
+                else:
+                    print("\n❌ Invalid selection")
+                    
+                # Wait for Arduino response
+                time.sleep(0.1)
+                while ser.in_waiting:
+                    response = ser.readline().decode().strip()
+                    if response:
+                        print(f"🟢 Arduino Response: {response}")
             elif choice not in ['\r', '\n']:  # Ignore enter key presses
                 print("\nInvalid choice. Please choose 1, 2, 3, r for IP config, i for Identity config, or q to quit")
         

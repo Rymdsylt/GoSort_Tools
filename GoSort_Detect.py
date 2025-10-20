@@ -418,6 +418,87 @@ def remove_from_waiting_devices(ip_address, device_identity):
         print(f"\n❌ Error removing from waiting devices: {e}")
         return False
 
+def list_arduino_ports():
+    """Return a list of candidate serial port device names likely to be Arduinos."""
+    try:
+        import serial.tools.list_ports
+        ports = serial.tools.list_ports.comports()
+        candidates = []
+        for port in ports:
+            if 'Arduino' in port.description or '2560' in port.description or 'Mega' in port.description:
+                print(f"Found Arduino-like device at: {port.device} ({port.description})")
+                candidates.append(port.device)
+        # If none matched by description, return all ports as fallback
+        if not candidates:
+            for port in ports:
+                candidates.append(port.device)
+        return candidates
+    except Exception:
+        return []
+
+def connect_to_arduino(port):
+    """Try to open a serial connection to the provided port with safe options.
+
+    Returns an open Serial object or None on failure.
+    """
+    try:
+        import serial
+        # Attempt quick open/close to release lock if possible
+        try:
+            temp_ser = serial.Serial(port)
+            temp_ser.close()
+        except Exception:
+            pass
+
+        ser = serial.Serial(
+            port=port,
+            baudrate=115200,
+            timeout=1,
+            write_timeout=1,
+            # exclusive param may not exist on all platforms/pyserial versions
+        )
+        time.sleep(2)
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            pass
+        return ser
+    except Exception as e:
+        print(f"Error connecting to {port}: {e}")
+        return None
+
+def process_bin_fullness(data, ip_address, device_identity):
+    # Format is "bin_fullness:BinName:Distance"
+    try:
+        parts = data.split(':')
+        if len(parts) == 3 and parts[0] == 'bin_fullness':
+            bin_name = parts[1]
+            try:
+                distance = int(parts[2])
+            except Exception:
+                distance = parts[2]
+
+            # Send data to backend using form data
+            try:
+                response = requests.post(
+                    f"http://{ip_address}/GoSort_Web/gs_DB/update_bin_fullness.php",
+                    data={
+                        'device_identity': device_identity,
+                        'bin_name': bin_name,
+                        'distance': distance
+                    },
+                    timeout=5
+                )
+
+                if response.status_code == 200 and "Record inserted" in response.text:
+                    print(f"\r✅ Bin Fullness - {bin_name}: {distance}cm (Saved to DB)", end="", flush=True)
+                else:
+                    print(f"\r❌ Bin Fullness - {bin_name}: {distance}cm (DB Error: {response.text})", end="", flush=True)
+            except Exception as e:
+                print(f"\r❌ Bin Fullness - {bin_name}: {distance}cm (Error: {e})", end="", flush=True)
+    except Exception as e:
+        print(f"\nError processing bin fullness data: {e}")
+
 def main():
     config = load_config()
     # First get IP address
@@ -534,14 +615,9 @@ def main():
         device = torch.device('cuda')
         backend = 'CUDA (NVIDIA GPU)'
     else:
-        # Try DirectML for integrated graphics
-        try:
-            import torch_directml
-            device = torch_directml.device()
-            backend = 'DirectML (Integrated Graphics)'
-        except ImportError:
-            device = torch.device('cpu')
-            backend = 'CPU'
+        # No CUDA available or CPU explicitly selected -> use CPU
+        device = torch.device('cpu')
+        backend = 'CPU'
     print(f"Using device: {device}")
     print(f"Backend: {backend}")
     
@@ -559,54 +635,67 @@ def main():
     model = YOLO('best885.pt')
     if device.type == 'cuda':
         model.to('cuda')
-    elif 'DirectML' in backend:
-        model.to(device)
+    else:
+        # model remains on CPU by default
+        pass
 
     model.conf = 0.50  
     model.iou = 0.50   
 
     try:
         import serial
-        import serial.tools.list_ports
         arduino = None
         command_handler = None
         arduino_connected = False
-        candidate_ports = list(serial.tools.list_ports.comports())
-        for port in candidate_ports:
-            if 'Arduino' in port.description or '2560' in port.description or True: 
+        candidate_ports = list_arduino_ports()
+        for p in candidate_ports:
+            ser = connect_to_arduino(p)
+            if ser is None:
+                continue
+            try:
+                arduino = ser
+                print(f"Connected to Arduino on {p}")
+                # Signal readiness to Arduino and read any initial messages
                 try:
-                    arduino = serial.Serial(port.device, 19200, timeout=1)
-                    time.sleep(2)  
-                    print(f"Connected to Arduino on {port.device} ({port.description})")
-
                     arduino.write(b'gosort_ready\n')
-                    print("Sent gosort_ready signal")
- 
-                    while arduino.in_waiting:
+                except Exception:
+                    pass
+                time.sleep(0.2)
+                while getattr(arduino, 'in_waiting', 0):
+                    try:
                         response = arduino.readline().decode().strip()
-                        print(f"Arduino: {response}")
-            
-                    command_handler = CommandHandler(arduino)
-                    arduino_connected = True
-                    def check_arduino_connection():
-                        nonlocal arduino_connected
-                        try:
-                            if not arduino.is_open:
-                                arduino_connected = False
-                                return False
-                            arduino.write(b'ping\n')
-                            time.sleep(0.1)
-                            return True
-                        except (serial.SerialException, OSError, Exception) as e:
-                            print(f"\n❌ Arduino connection lost: {e}")
+                        if response:
+                            print(f"Arduino: {response}")
+                            if response.startswith('bin_fullness:'):
+                                process_bin_fullness(response, ip_address, sorter_id)
+                    except Exception:
+                        break
+
+                command_handler = CommandHandler(arduino)
+                arduino_connected = True
+
+                def check_arduino_connection():
+                    nonlocal arduino_connected
+                    try:
+                        if not arduino or not getattr(arduino, 'is_open', True):
                             arduino_connected = False
                             return False
-                    break  #
-                except Exception as e:
-                    print(f"Failed to connect to {port.device}: {e}")
-                    if arduino:
-                        arduino.close()
-                    arduino = None
+                        arduino.write(b'ping\n')
+                        time.sleep(0.1)
+                        return True
+                    except Exception as e:
+                        print(f"\n❌ Arduino connection lost: {e}")
+                        arduino_connected = False
+                        return False
+
+                break
+            except Exception as e:
+                print(f"Failed to initialize serial on {p}: {e}")
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                arduino = None
         if not arduino_connected:
             print("No Arduino found on any COM port.")
             def check_arduino_connection():
@@ -673,6 +762,23 @@ def main():
 
                 remove_from_waiting_devices(ip_address, sorter_id)
                 break
+
+        # Process any incoming serial messages (bin fullness, logs, etc.)
+        try:
+            if arduino_connected and command_handler is not None and getattr(command_handler.arduino, 'in_waiting', 0):
+                while command_handler.arduino.in_waiting:
+                    try:
+                        line = command_handler.arduino.readline().decode().strip()
+                        if not line:
+                            continue
+                        if line.startswith('bin_fullness:'):
+                            process_bin_fullness(line, ip_address, sorter_id)
+                        else:
+                            print(f"🟢 Arduino: {line}")
+                    except Exception:
+                        break
+        except Exception:
+            pass
 
 
         current_maintenance = check_maintenance_mode(ip_address, sorter_id)
