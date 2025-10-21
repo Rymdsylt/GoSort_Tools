@@ -921,24 +921,42 @@ def main():
             fps_time = current_time
 
         if not current_maintenance:
+            # Collect all detections in this frame
+            frame_detections = []
+            categories = load_categories()
+            
             for result in results:
                 boxes = result.boxes.cpu().numpy()
                 for box in boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].astype(int)
-                    conf = box.conf[0]
-                    class_id = int(box.cls[0])
-                    detected_item = model.names[class_id]
-                    
-                    # Map the detected item to its category using categories.json
-                    categories = load_categories()
-                    class_name = None
-                    for category, items in categories.items():
-                        if detected_item.lower() in [item.lower() for item in items]:
-                            class_name = category
-                            break
-                    
-                    if class_name is None:
-                        class_name = "non_bio"  # Default category if not found
+                    if box.conf[0] > 0.50:  # Only consider high confidence detections
+                        x1, y1, x2, y2 = box.xyxy[0].astype(int)
+                        conf = box.conf[0]
+                        class_id = int(box.cls[0])
+                        detected_item = model.names[class_id]
+                        
+                        # Map the detected item to its category using categories.json
+                        class_name = None
+                        for category, items in categories.items():
+                            if detected_item.lower() in [item.lower() for item in items]:
+                                class_name = category
+                                break
+                        
+                        if class_name is None:
+                            class_name = "non_bio"  # Default category if not found
+                            
+                        frame_detections.append({
+                            'item': detected_item,
+                            'category': class_name,
+                            'conf': conf,
+                            'box': (x1, y1, x2, y2)
+                        })
+                        
+                        # Draw bounding box and label
+                        overlay = frame.copy()
+                        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(overlay, f"{detected_item} {conf:.2f}", (x1, y1 - 10),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
 
                     # Draw bounding box and label with 75% opacity
                     overlay = frame.copy()
@@ -948,15 +966,32 @@ def main():
                     # Apply the overlay with 75% opacity
                     cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
 
-                    # Process detections with high confidence
-                    if conf > 0.50:  # 50% confidence threshold
-                        # Map the detected category to a servo command
-                        command = map_category_to_command(class_name, mapping)
+                    # Process all detections in the frame
+                    if frame_detections:
+                        # Determine final category based on rules:
+                        # 1. If any hazardous items, everything goes to hazardous
+                        # 2. If multiple different non-hazardous categories, use mixed
+                        # 3. If single category, use that category
+                        
+                        categories_present = set(d['category'] for d in frame_detections)
+                        
+                        if 'hazardous' in categories_present:
+                            final_category = 'hazardous'
+                        elif len(categories_present) > 1:
+                            final_category = 'mixed'
+                        else:
+                            final_category = next(iter(categories_present))
+                        
+                        # Map the final category to a servo command
+                        command = map_category_to_command(final_category, mapping)
                         # Get the corresponding trash type from the mapping
                         trash_type = mapping.get(command, 'nbio')
                         
                         try:
-                            print(f"✅ Detection: {detected_item} ({conf:.2f}) - Category: {class_name}")
+                            # Log all detections
+                            for detection in frame_detections:
+                                print(f"✅ Detection: {detection['item']} ({detection['conf']:.2f}) - Category: {detection['category']}")
+                            print(f"👉 Final decision: {final_category} (Command: {command})")
                             
                             # Record sorting operation
                             url = f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php"
