@@ -8,7 +8,6 @@ import torch
 import requests
 import json
 import os
-import base64
 import socket
 import concurrent.futures
 import threading
@@ -299,24 +298,16 @@ def check_server_connection(ip_address):
         return False
 
 def map_category_to_command(category, mapping):
-    # Define hazardous items
-    hazardous_items = {'light bulb', 'glass', 'face mask'}
-    # Define biodegradable items
-    bio_items = {'banana peel', 'food'}
-    # Everything else is non-bio by default
+    # Map categories to the standard waste types used in the mapping
+    category_to_type = {
+        'bio': 'bio',
+        'hazardous': 'nbio',  # Hazardous waste goes to non-bio bin
+        'recyclable': 'recyc',
+        'non_bio': 'nbio',
+        'mixed': 'mixed'
+    }
     
-    # Convert category to lowercase for comparison
-    category = category.lower()
-    
-    # Check if the item is in hazardous list
-    if category in {item.lower() for item in hazardous_items}:
-        waste_type = 'hazardous'
-    # Check if the item is in biodegradable list
-    elif category in {item.lower() for item in bio_items}:
-        waste_type = 'bio'
-    # All other items are non-biodegradable
-    else:
-        waste_type = 'nbio'
+    waste_type = category_to_type.get(category, 'nbio')  # Default to non-bio if category not found
     
     # Find the servo command for this waste type
     for cmd, typ in mapping.items():
@@ -930,95 +921,106 @@ def main():
             fps_time = current_time
 
         if not current_maintenance:
+            # Collect all detections in this frame
+            frame_detections = []
+            categories = load_categories()
+            
             for result in results:
                 boxes = result.boxes.cpu().numpy()
                 for box in boxes:
+                    try:
+                        conf = float(box.conf[0])
+                    except Exception:
+                        # Skip malformed box entries
+                        continue
+
+                    if conf <= 0.50:
+                        continue  # skip low confidence detections
+
+                    # Safe to extract coordinates and class info now
                     x1, y1, x2, y2 = box.xyxy[0].astype(int)
-                    conf = box.conf[0]
                     class_id = int(box.cls[0])
                     detected_item = model.names[class_id]
-                    
+
                     # Map the detected item to its category using categories.json
-                    categories = load_categories()
                     class_name = None
                     for category, items in categories.items():
                         if detected_item.lower() in [item.lower() for item in items]:
                             class_name = category
                             break
-                    
+
                     if class_name is None:
-                        class_name = "non_bio"  # Default category if not found
+                        class_name = "non_bio"
 
-                    # Store original frame for database
-                    clean_frame = frame.copy()
+                    frame_detections.append({
+                        'item': detected_item,
+                        'category': class_name,
+                        'conf': conf,
+                        'box': (x1, y1, x2, y2)
+                    })
 
-                    # Draw bounding box and label with 75% opacity (only for display)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(frame, f"{detected_item} {conf:.2f}", (x1, y1 - 10),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    # Draw bounding box and label once per valid detection
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(overlay, f"{detected_item} {conf:.2f}", (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
 
-                    # Process detections with high confidence
-                    if conf > 0.50:  # 50% confidence threshold
-                        # Map the detected category to a servo command
-                        command = map_category_to_command(class_name, mapping)
-                        # Get the corresponding trash type from the mapping
-                        trash_type = mapping.get(command, 'nbio')
-                        
-                        try:
-                            print(f"✅ Detection: {detected_item} ({conf:.2f}) - Category: {class_name}")
-                            
-                            # Convert clean frame to base64 for sending
-                            _, buffer = cv2.imencode('.jpg', clean_frame)
-                            image_base64 = base64.b64encode(buffer).decode('utf-8')
-                            
-                            # For mixed waste, we'll collect all detected items
-                            detected_classes = []
-                            if trash_type == 'mixed':
-                                # Look for other detections in this frame
-                                for other_box in boxes:
-                                    other_conf = other_box.conf[0]
-                                    if other_conf > 0.50:  # Use same confidence threshold
-                                        other_class_id = int(other_box.cls[0])
-                                        other_item = model.names[other_class_id]
-                                        detected_classes.append(other_item)
-                            else:
-                                detected_classes = [detected_item]
-                            
-                            # Join the detected classes with commas
-                            trash_class_str = ', '.join(detected_classes)
-                            
-                            # Record sorting operation
-                            url = f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php"
-                            response = requests.post(url, json={
-                                'device_identity': sorter_id,
-                                'trash_type': trash_type,
-                                'trash_class': trash_class_str,
-                                'confidence': float(conf),
-                                'image_data': image_base64,
-                                'is_maintenance': False
-                            })
-                            if response.status_code == 200:
-                                print(f"✅ Sorting operation recorded")
-                            else:
-                                print(f"❌ Failed to record sorting operation")
+            # Process all detections in the frame (once after collecting them)
+            if frame_detections:
+                # Determine final category based on rules:
+                # 1. If any hazardous items, everything goes to hazardous
+                # 2. If multiple different non-hazardous categories, use mixed
+                # 3. If single category, use that category
+                categories_present = set(d['category'] for d in frame_detections)
 
-                            # Send command to Arduino if available
-                            if command_handler is not None:
-                                if command_handler.command_queue.empty():
-                                    print("⏱️ Starting sorting sequence...")
-                                    cmd = ArduinoCommand(f"{command}\n")
-                                    command_handler.command_queue.put(cmd)
-                                    
-                                    # Wait for this command to complete
-                                    while not cmd.done and command_handler.running:
-                                        time.sleep(0.1)  # Check every 100ms
-                                    
-                                    print("✅ Sorting mechanism complete - resuming detection")
-                                else:
-                                    print("⏳ Waiting for previous sorting operation to complete...")
-                                    
-                        except Exception as e:
-                            print(f"❌ Error processing detection: {e}")
+                if 'hazardous' in categories_present:
+                    final_category = 'hazardous'
+                elif len(categories_present) > 1:
+                    final_category = 'mixed'
+                else:
+                    final_category = next(iter(categories_present))
+
+                # Map the final category to a servo command
+                command = map_category_to_command(final_category, mapping)
+                # Get the corresponding trash type from the mapping
+                trash_type = mapping.get(command, 'nbio')
+
+                try:
+                    # Log all detections
+                    for detection in frame_detections:
+                        print(f"✅ Detection: {detection['item']} ({detection['conf']:.2f}) - Category: {detection['category']}")
+                    print(f"👉 Final decision: {final_category} (Command: {command})")
+
+                    # Record sorting operation
+                    url = f"http://{ip_address}/GoSort_Web/gs_DB/record_sorting.php"
+                    response = requests.post(url, json={
+                        'device_identity': sorter_id,
+                        'trash_type': trash_type,
+                        'is_maintenance': False
+                    })
+                    if response.status_code == 200:
+                        print(f"✅ Sorting operation recorded")
+                    else:
+                        print(f"❌ Failed to record sorting operation")
+
+                    # Send command to Arduino if available
+                    if command_handler is not None:
+                        if command_handler.command_queue.empty():
+                            print("⏱️ Starting sorting sequence...")
+                            cmd = ArduinoCommand(f"{command}\n")
+                            command_handler.command_queue.put(cmd)
+
+                            # Wait for this command to complete
+                            while not cmd.done and command_handler.running:
+                                time.sleep(0.1)  # Check every 100ms
+
+                            print("✅ Sorting mechanism complete - resuming detection")
+                        else:
+                            print("⏳ Waiting for previous sorting operation to complete...")
+
+                except Exception as e:
+                    print(f"❌ Error processing detection: {e}")
         ui_panel = np.zeros((100, frame.shape[1], 3), dtype=np.uint8)
         
         # Change IP button
@@ -1044,7 +1046,7 @@ def main():
         combined_frame = np.vstack((frame, ui_panel))
 
         # Show the result
-        cv2.imshow("YOLOv11 Detection", combined_frame)
+        cv2.imshow("YOLOv8 Detection", combined_frame)
         
         # Handle mouse events
         def mouse_callback(event, x, y, flags, param):
@@ -1090,7 +1092,7 @@ def main():
                             command_handler.stop()
                         exit()
 
-        cv2.setMouseCallback("YOLOv11 Detection", mouse_callback)
+        cv2.setMouseCallback("YOLOv8 Detection", mouse_callback)
         
         # Wait for key press (reduced wait time for smoother UI)
         if cv2.waitKey(1) & 0xFF == ord('q'):
