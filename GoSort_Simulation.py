@@ -239,24 +239,12 @@ def process_bin_fullness(data, ip_address, device_identity):
                     }
                 )
                 
-                if response.status_code == 200:
-                    try:
-                        data_response = response.json()
-                        if data_response.get('success'):
-                            # Success - show bin fullness and database status
-                            print(f"\r✅ Bin Fullness - {bin_name}: {distance}cm (Saved to DB)\n", end="", flush=True)
-                        else:
-                            # Error - show what went wrong
-                            print(f"\r❌ Bin Fullness - {bin_name}: {distance}cm (DB Error: {data_response.get('message', 'Unknown error')})\n", end="", flush=True)
-                    except:
-                        # If not JSON, check for text indicators
-                        if "Record inserted" in response.text or "updated" in response.text.lower():
-                            print(f"\r✅ Bin Fullness - {bin_name}: {distance}cm (Saved to DB)\n", end="", flush=True)
-                        else:
-                            print(f"\r❌ Bin Fullness - {bin_name}: {distance}cm (DB Error: {response.text})\n", end="", flush=True)
+                if response.status_code == 200 and "Record inserted" in response.text:
+                    # Success - show bin fullness and database status
+                    print(f"\r✅ Bin Fullness - {bin_name}: {distance}cm (Saved to DB)\n", end="", flush=True)
                 else:
                     # Error - show what went wrong
-                    print(f"\r❌ Bin Fullness - {bin_name}: {distance}cm (HTTP {response.status_code}: {response.text})\n", end="", flush=True)
+                    print(f"\r❌ Bin Fullness - {bin_name}: {distance}cm (DB Error: {response.text})\n", end="", flush=True)
             except Exception as e:
                 print(f"\r❌ Bin Fullness - {bin_name}: {distance}cm (Error: {e})\n", end="", flush=True)
                 
@@ -634,25 +622,6 @@ def main():
                 simulated_responses.append(f"bin_fullness:{bin_type}:9")
                 simulated_responses.append(f"bin_fullness:{bin_type}:10")
                 print(f"\n📡 Sensor Triggered: Simulating '{bin_type}' bin full at 9cm and 10cm")
-                
-                # Also trigger a notification
-                try:
-                    bin_label = trash_labels.get(bin_type, bin_type).title()
-                    notification_message = f"{bin_label} bin is full"
-                    requests.post(
-                        f"http://{ip_address}/GoSort_Web/api/add_bin_notification.php",
-                        json={
-                            'message': notification_message,
-                            'type': 'bin_full',
-                            'device_identity': config['sorter_id'],
-                            'priority': 'high',
-                            'bin_name': bin_type,
-                            'fullness_level': 100
-                        },
-                        headers={'Content-Type': 'application/json'}
-                    )
-                except Exception as e:
-                    print(f"⚠️ Error sending notification: {e}")
                 
             elif choice not in ['\r', '\n']:  # Ignore enter key presses
                 print("\nInvalid choice. Please choose from the menu options.")

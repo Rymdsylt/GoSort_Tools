@@ -1,29 +1,26 @@
 {
-    "bio": [
-        "food",
-        "fruit",
-        "paper",
-        "paper cup",
-        "paper plate"
-    ],
-    "recyclable": [
-        "can",
-        "plastic container",
-        "plastic cup",
-        "pet bottle",
-        "plastic bag",
-        "paper"
-    ],
-    "hazardous": [
-        "glass",
-        "face mask",
-        "light bulb"
-    ],
-    "non_bio": [
-        "plastic utensil",
-        "food container",
-        "plastic spoon",
-        "wrappers",
-        "pen"
-    ]
+  "bio": [
+    "banana peel",
+    "food",
+    "food container",
+    "paper",
+    "paper cup",
+    "paper plate"
+  ],
+  "nbio": [
+    "can",
+    "pen",
+    "pet bottle",
+    "plastic bag",
+    "plastic cup",
+    "plastic straw",
+    "plastic utensil",
+    "wrappers"
+  ],
+  "hazardous": [
+    "light bulb",
+    "glass",
+    "face mask"
+  ],
+  "mixed": []
 }
