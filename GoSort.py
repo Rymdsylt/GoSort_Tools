@@ -496,6 +496,12 @@ def main():
             label = trash_labels.get(ttype, ttype)
             print(f"{idx}. {label}")
         print("4. Mixed")
+        print("\nSensor Simulation (Triggers Bin Fullness at 10cm):")
+        print("5. Simulate Biodegradable Bin Fullness")
+        print("6. Simulate Non-Biodegradable Bin Fullness")
+        print("7. Simulate Hazardous Bin Fullness")
+        print("8. Simulate Mixed Bin Fullness")
+        print("\nConfiguration:")
         print("r. Reconfigure IP")
         print("i. Reconfigure Identity")
         print("c. Clear All Configuration")
@@ -738,6 +744,91 @@ def main():
                     response = ser.readline().decode().strip()
                     if response:
                         print(f"🟢 Arduino Response: {response}")
+                        
+            elif choice in ['5', '6', '7', '8']:
+                # Sensor Simulation triggers
+                # '5' -> Bio fullness
+                # '6' -> Non-bio fullness
+                # '7' -> Haz fullness
+                # '8' -> Mixed fullness
+                sim_map = {
+                    '5': 'bio',
+                    '6': 'nbio',
+                    '7': 'hazardous',
+                    '8': 'mixed'
+                }
+                bin_type = sim_map[choice]
+                
+                # Send two bin fullness readings to trigger notification
+                print(f"\n📡 Sensor Triggered: Simulating '{bin_type}' bin full at 9cm and 10cm")
+                
+                # Send first reading (9cm)
+                try:
+                    response = requests.post(
+                        f"http://{ip_address}/GoSort_Web/gs_DB/update_bin_fullness.php",
+                        data={
+                            'device_identity': config['sorter_id'],
+                            'bin_name': bin_type,
+                            'distance': 9
+                        }
+                    )
+                    if response.status_code == 200:
+                        try:
+                            data = response.json()
+                            if data.get('success'):
+                                print(f"✅ Bin Fullness - {bin_type}: 9cm (Saved to DB)")
+                            else:
+                                print(f"❌ Bin Fullness - {bin_type}: 9cm (DB Error: {data.get('message', 'Unknown error')})")
+                        except:
+                            if "updated" in response.text.lower():
+                                print(f"✅ Bin Fullness - {bin_type}: 9cm (Saved to DB)")
+                except Exception as e:
+                    print(f"❌ Bin Fullness - {bin_type}: 9cm (Error: {e})")
+                
+                time.sleep(0.2)
+                
+                # Send second reading (10cm)
+                try:
+                    response = requests.post(
+                        f"http://{ip_address}/GoSort_Web/gs_DB/update_bin_fullness.php",
+                        data={
+                            'device_identity': config['sorter_id'],
+                            'bin_name': bin_type,
+                            'distance': 10
+                        }
+                    )
+                    if response.status_code == 200:
+                        try:
+                            data = response.json()
+                            if data.get('success'):
+                                print(f"✅ Bin Fullness - {bin_type}: 10cm (Saved to DB)")
+                            else:
+                                print(f"❌ Bin Fullness - {bin_type}: 10cm (DB Error: {data.get('message', 'Unknown error')})")
+                        except:
+                            if "updated" in response.text.lower():
+                                print(f"✅ Bin Fullness - {bin_type}: 10cm (Saved to DB)")
+                except Exception as e:
+                    print(f"❌ Bin Fullness - {bin_type}: 10cm (Error: {e})")
+                
+                # Also trigger a notification
+                try:
+                    bin_label = trash_labels.get(bin_type, bin_type).title()
+                    notification_message = f"{bin_label} bin is full"
+                    requests.post(
+                        f"http://{ip_address}/GoSort_Web/api/add_bin_notification.php",
+                        json={
+                            'message': notification_message,
+                            'type': 'bin_full',
+                            'device_identity': config['sorter_id'],
+                            'priority': 'high',
+                            'bin_name': bin_type,
+                            'fullness_level': 100
+                        },
+                        headers={'Content-Type': 'application/json'}
+                    )
+                except Exception as e:
+                    print(f"⚠️ Error sending notification: {e}")
+                    
             elif choice not in ['\r', '\n']:  # Ignore enter key presses
                 print("\nInvalid choice. Please choose 1, 2, 3, r for IP config, i for Identity config, or q to quit")
         

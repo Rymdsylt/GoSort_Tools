@@ -16,6 +16,19 @@ import sys
 import msvcrt
 import platform
 import cpuinfo
+from datetime import datetime
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+try:
+    import pygame
+    PYGAME_AVAILABLE = True
+    pygame.mixer.init()
+except ImportError:
+    PYGAME_AVAILABLE = False
 
 def is_maintenance_mode():
     return os.path.exists('python_maintenance_mode.txt')
@@ -260,23 +273,41 @@ class VideoStream:
 
 def list_available_cameras(max_cams=10):
     available = []
-
-    cap = cv2.VideoCapture(0)
-    if cap.isOpened():
-        ret, _ = cap.read()
-        if ret:
-            print("Camera 0 is available (default backend)")
-            available.append(0)
-        cap.release()
-
-    if not available:
-        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    
+    print("Scanning for available cameras...")
+    
+    # Try each camera index
+    for i in range(max_cams):
+        found = False
+        
+        # Try default backend first
+        cap = cv2.VideoCapture(i)
         if cap.isOpened():
-            ret, _ = cap.read()
-            if ret:
-                print("Camera 0 is available (DirectShow)")
-                available.append(0)
+            ret, frame = cap.read()
+            if ret and frame is not None and frame.size > 0:
+                print(f"✅ Camera {i} is available (default backend)")
+                available.append(i)
+                found = True
             cap.release()
+        
+        # If not found with default, try DirectShow (Windows)
+        if not found:
+            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    print(f"✅ Camera {i} is available (DirectShow)")
+                    available.append(i)
+                    found = True
+                cap.release()
+        
+        # Small delay to avoid resource conflicts
+        time.sleep(0.1)
+    
+    if available:
+        print(f"\n🎥 Found {len(available)} camera(s): {available}")
+    else:
+        print("\n❌ No cameras found!")
     
     return available
 
@@ -298,36 +329,21 @@ def check_server_connection(ip_address):
     except:
         return False
 
-def map_category_to_command(category, mapping):
-    # Define hazardous items
-    hazardous_items = {'light bulb', 'glass', 'face mask'}
-    # Define biodegradable items
-    bio_items = {'banana peel', 'food'}
-    # Everything else is non-bio by default
+def map_category_to_command(waste_type, mapping):
+    # waste_type is already a category like 'bio', 'nbio', 'hazardous', 'mixed'
+    # Convert to lowercase for comparison
+    waste_type = waste_type.lower()
     
-    # Convert category to lowercase for comparison
-    category = category.lower()
-    
-    # Check if the item is in hazardous list
-    if category in {item.lower() for item in hazardous_items}:
-        waste_type = 'hazardous'
-    # Check if the item is in biodegradable list
-    elif category in {item.lower() for item in bio_items}:
-        waste_type = 'bio'
-    # All other items are non-biodegradable
-    else:
-        waste_type = 'nbio'
-    
-    # Find the servo command for this waste type
+    # Find the servo command for this waste type from the mapping
     for cmd, typ in mapping.items():
-        if typ == waste_type:
+        if typ.lower() == waste_type:
             return cmd
     
     # Default commands if not found in mapping
     default_commands = {
         'bio': 'zdeg',
         'nbio': 'ndeg',
-        'recyc': 'odeg',
+        'hazardous': 'odeg',
         'mixed': 'mdeg'
     }
     return default_commands.get(waste_type, 'ndeg')  # Default to ndeg if no mapping found
@@ -343,7 +359,7 @@ def check_maintenance_mode(ip_address, device_identity):
         if response.status_code == 200:
             data = response.json()
             if data.get('success'):
-                return data.get('maintenance_mode') == 1
+                return data.get('maintenance_mode') == 11
         return False
     except Exception as e:
         print(f"\n❌ Error checking maintenance mode: {e}")
@@ -508,6 +524,200 @@ def process_bin_fullness(data, ip_address, device_identity):
     except Exception as e:
         print(f"\nError processing bin fullness data: {e}")
 
+def play_sorting_audio(waste_type):
+    """Play audio file based on waste type in a separate thread (non-blocking)"""
+    if not PYGAME_AVAILABLE:
+        return
+    
+    def play_audio_thread():
+        # Map waste types to audio files
+        audio_files = {
+            'bio': 'audio/biodegradable.mp3',
+            'nbio': 'audio/nonbiodegradable.mp3',
+            'hazardous': 'audio/hazardous.mp3',
+            'mixed': 'audio/mixed.mp3'
+        }
+        
+        audio_file = audio_files.get(waste_type)
+        if audio_file and os.path.exists(audio_file):
+            try:
+                pygame.mixer.music.load(audio_file)
+                pygame.mixer.music.play()
+            except Exception as e:
+                print(f"\n⚠️ Error playing audio: {e}")
+    
+    # Start audio in a separate thread so it doesn't block UI updates
+    audio_thread = Thread(target=play_audio_thread, daemon=True)
+    audio_thread.start()
+
+def get_poppins_font(font_size):
+    """Try to load Poppins font, return None if not available"""
+    if not PIL_AVAILABLE:
+        return None
+    
+    font_paths = [
+        'fonts/Poppins-Regular.ttf',
+        'fonts/Poppins-SemiBold.ttf',
+        'C:/Windows/Fonts/poppins.ttf',
+        'C:/Windows/Fonts/Poppins-Regular.ttf',
+    ]
+    
+    for path in font_paths:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, font_size)
+            except:
+                continue
+    
+    # Try system default sans-serif
+    try:
+        return ImageFont.truetype("arial.ttf", font_size)
+    except:
+        return ImageFont.load_default()
+    
+def get_text_size_pil(text, font):
+    """Get text size using PIL font"""
+    if font is None:
+        return (len(text) * 20, 30)  # Rough estimate
+    try:
+        bbox = font.getbbox(text)
+        return (bbox[2] - bbox[0], bbox[3] - bbox[1])
+    except:
+        return (len(text) * 20, 30)
+    
+def draw_text_with_font(img, text, position, font_size, color, use_poppins=True):
+    """Draw text with Poppins font if available, otherwise use OpenCV default"""
+    if PIL_AVAILABLE and use_poppins:
+        try:
+            font = get_poppins_font(font_size)
+            
+            # Convert OpenCV image to PIL
+            img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(img_pil)
+            
+            # Draw text - convert BGR to RGB for PIL
+            color_rgb = (color[2], color[1], color[0])
+            draw.text(position, text, font=font, fill=color_rgb)
+            
+            # Convert back to OpenCV format
+            img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+            return img
+        except Exception as e:
+            # Fallback to OpenCV if PIL fails
+            pass
+    
+    # Fallback to OpenCV font
+    scale = font_size / 30.0
+    cv2.putText(img, text, position, cv2.FONT_HERSHEY_SIMPLEX, scale, color, 2)
+    return img
+
+def draw_kiosk_ui(sorting_history, current_view='both', kiosk_width=1920, kiosk_height=1080):
+    """Create a simplified kiosk-style UI showing only the last sorted item"""
+    # Webapp color scheme (BGR format for OpenCV)
+    bg_color = (239, 243, 243)  # #F3F3EF - app background
+    primary_green = (23, 74, 39)  # #274a17 - primary green
+    dark_gray = (55, 47, 31)  # #1f2937 - dark gray text
+    medium_gray = (128, 114, 107)  # #6b7280 - medium gray
+    
+    # Waste type colors (BGR format)
+    waste_colors = {
+        'bio': (129, 185, 16),  # #10b981 - green
+        'nbio': (68, 68, 239),  # #ef4444 - red
+        'hazardous': (11, 158, 245),  # #f59e0b - orange/amber
+        'mixed': (128, 114, 107)  # #6b7280 - gray
+    }
+    
+    # Simplified waste names
+    waste_names = {
+        'bio': 'Biodegradable',
+        'nbio': 'Non-Biodegradable',
+        'hazardous': 'Hazardous',
+        'mixed': 'Mixed'
+    }
+    
+    # Create background with webapp color
+    kiosk_frame = np.full((kiosk_height, kiosk_width, 3), bg_color, dtype=np.uint8)
+    
+    # Simple header
+    header_height = 120
+    cv2.rectangle(kiosk_frame, (0, 0), (kiosk_width, header_height), primary_green, -1)
+    
+    # GoSort title
+    kiosk_frame = draw_text_with_font(kiosk_frame, "GoSort", 
+                                      (80, 40), 48, (255, 255, 255))
+    
+    # View mode indicator (top right, subtle)
+    view_text = "Press A+S to toggle views"
+    kiosk_frame = draw_text_with_font(kiosk_frame, view_text, 
+                                      (kiosk_width - 300, 40), 20, (200, 200, 200))
+    
+    # Display only the last sorted item
+    if not sorting_history:
+        # Show "No items sorted yet" message
+        center_x = kiosk_width // 2
+        center_y = kiosk_height // 2
+        no_items_text = "No items sorted yet"
+        font = get_poppins_font(36)
+        if font:
+            text_width, _ = get_text_size_pil(no_items_text, font)
+            text_x = center_x - text_width // 2
+        else:
+            text_size = cv2.getTextSize(no_items_text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 2)[0]
+            text_x = center_x - text_size[0] // 2
+        kiosk_frame = draw_text_with_font(kiosk_frame, no_items_text, 
+                                         (text_x, center_y), 36, medium_gray)
+    else:
+        # Get the most recent (first) item
+        last_item = sorting_history[0]
+        waste_type = last_item.get('waste_type', 'nbio')
+        waste_label = waste_names.get(waste_type, 'Unknown')
+        color = waste_colors.get(waste_type, medium_gray)
+        
+        # Center the content
+        center_x = kiosk_width // 2
+        center_y = kiosk_height // 2 - 50
+        
+        # "Sorted:" text
+        sorted_text = "Sorted:"
+        font_large = get_poppins_font(60)
+        
+        # Calculate text widths
+        sorted_width, _ = get_text_size_pil(sorted_text, font_large)
+        waste_width, _ = get_text_size_pil(waste_label, font_large)
+        
+        # If using OpenCV fallback, estimate width
+        if font_large is None:
+            sorted_width = cv2.getTextSize(sorted_text, cv2.FONT_HERSHEY_SIMPLEX, 2.0, 3)[0][0]
+            waste_width = cv2.getTextSize(waste_label, cv2.FONT_HERSHEY_SIMPLEX, 2.0, 3)[0][0]
+        
+        # Calculate starting position to center both texts together
+        total_width = sorted_width + waste_width + 20  # 20px spacing
+        start_x = center_x - total_width // 2
+        
+        # Draw "Sorted:" text
+        kiosk_frame = draw_text_with_font(kiosk_frame, sorted_text, 
+                                         (start_x, center_y), 60, dark_gray)
+        
+        # Draw waste type text in color (next to "Sorted:")
+        waste_x = start_x + sorted_width + 20
+        kiosk_frame = draw_text_with_font(kiosk_frame, waste_label, 
+                                         (waste_x, center_y), 60, color)
+        
+        # "Have a nice day" message below
+        nice_day_y = center_y + 120
+        nice_day_text = "Have a nice day"
+        font_small = get_poppins_font(40)
+        nice_day_width, _ = get_text_size_pil(nice_day_text, font_small)
+        
+        if font_small is None:
+            nice_day_width = cv2.getTextSize(nice_day_text, cv2.FONT_HERSHEY_SIMPLEX, 1.3, 2)[0][0]
+        
+        nice_day_x = center_x - nice_day_width // 2
+        kiosk_frame = draw_text_with_font(kiosk_frame, nice_day_text, 
+                                         (nice_day_x, nice_day_y), 40, medium_gray)
+    
+    return kiosk_frame
+
 def main():
     config = load_config()
     # First get IP address
@@ -515,6 +725,15 @@ def main():
     config['ip_address'] = ip_address
     save_config(config)
     print(f"\nUsing GoSort server at: {ip_address}")
+    
+    # Initialize sorting history for kiosk UI
+    sorting_history = []
+    
+    # View toggle state: 'both', 'camera', or 'kiosk'
+    current_view = 'kiosk'  # Start with kiosk view visible
+    a_key_pressed = False
+    a_key_time = 0
+    kiosk_maximized = False  # Track if kiosk window has been maximized
 
     # Then get identity configuration
     if config.get('sorter_id') is None:
@@ -726,6 +945,7 @@ def main():
         return
 
     cam_index = available_cams[0]
+    current_cam_idx = 0  # Index into available_cams list
     print(f"Using camera index: {cam_index}")
 
    
@@ -743,17 +963,17 @@ def main():
     mapping_url = f"http://{ip_address}/GoSort_Web/gs_DB/save_sorter_mapping.php?device_identity={sorter_id}"
     try:
         resp = requests.get(mapping_url)
-        mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
+        mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'hazardous'})
     except Exception as e:
         print(f"Warning: Could not fetch mapping, using default. {e}")
-        mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
+        mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'hazardous'}
 
     trash_to_cmd = {v: k for k, v in mapping.items()}
 
     while True:
         frame = stream.read()
         frame_count += 1
-
+        
 
         current_time = time.time()
         if current_time - last_heartbeat >= heartbeat_interval:
@@ -802,10 +1022,10 @@ def main():
 
                 try:
                     resp = requests.get(mapping_url)
-                    mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'})
+                    mapping = resp.json().get('mapping', {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'hazardous'})
                 except Exception as e:
                     print(f"Warning: Could not fetch mapping, using default. {e}")
-                    mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'recyc'}
+                    mapping = {'zdeg': 'bio', 'ndeg': 'nbio', 'odeg': 'hazardous'}
 
                 trash_to_cmd = {v: k for k, v in mapping.items()}
             last_maintenance_status = current_maintenance
@@ -904,6 +1124,20 @@ def main():
                                                         'is_maintenance': True
                                                     }
                                                 )
+                                                # Add to sorting history for kiosk UI FIRST (so UI updates immediately)
+                                                timestamp = datetime.now().strftime("%H:%M:%S")
+                                                sorting_history.insert(0, {
+                                                    'waste_type': trash_type,
+                                                    'item_name': 'Maintenance Sort',
+                                                    'timestamp': timestamp,
+                                                    'confidence': 1.0
+                                                })
+                                                # Keep only last 20 items
+                                                if len(sorting_history) > 20:
+                                                    sorting_history.pop()
+                                                
+                                                # Play audio for the sorted waste type (non-blocking)
+                                                play_sorting_audio(trash_type)
                                             except Exception as e:
                                                 print(f"\n⚠️ Error recording sorting: {e}")
                                     
@@ -947,7 +1181,7 @@ def main():
                             break
                     
                     if class_name is None:
-                        class_name = "non_bio"  # Default category if not found
+                        class_name = "nbio"  # Default category if not found
 
                     # Store original frame for database
                     clean_frame = frame.copy()
@@ -999,6 +1233,21 @@ def main():
                             })
                             if response.status_code == 200:
                                 print(f"✅ Sorting operation recorded")
+                                
+                                # Add to sorting history for kiosk UI FIRST (so UI updates immediately)
+                                timestamp = datetime.now().strftime("%H:%M:%S")
+                                sorting_history.insert(0, {
+                                    'waste_type': trash_type,
+                                    'item_name': detected_item,
+                                    'timestamp': timestamp,
+                                    'confidence': float(conf)
+                                })
+                                # Keep only last 20 items
+                                if len(sorting_history) > 20:
+                                    sorting_history.pop()
+                                
+                                # Play audio for the sorted waste type (non-blocking)
+                                play_sorting_audio(trash_type)
                             else:
                                 print(f"❌ Failed to record sorting operation")
 
@@ -1029,25 +1278,77 @@ def main():
         cv2.rectangle(ui_panel, (170, 10), (310, 40), (0, 255, 0), -1)
         cv2.putText(ui_panel, "Change ID", (190, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
         
+        # Switch Camera button
+        cv2.rectangle(ui_panel, (330, 10), (490, 40), (100, 200, 255), -1)  # Orange color
+        camera_label = f"Camera ({current_cam_idx + 1}/{len(available_cams)})"
+        cv2.putText(ui_panel, camera_label, (345, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        
         # Reconfigure All button
-        cv2.rectangle(ui_panel, (330, 10), (470, 40), (0, 255, 0), -1)
-        cv2.putText(ui_panel, "Reconfig All", (340, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+        cv2.rectangle(ui_panel, (510, 10), (650, 40), (0, 255, 0), -1)
+        cv2.putText(ui_panel, "Reconfig All", (520, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
         
         # Exit button
-        cv2.rectangle(ui_panel, (490, 10), (630, 40), (0, 0, 255), -1)
-        cv2.putText(ui_panel, "Exit", (535, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
+        cv2.rectangle(ui_panel, (670, 10), (810, 40), (0, 0, 255), -1)
+        cv2.putText(ui_panel, "Exit", (715, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
         cv2.putText(frame, f"FPS: {fps}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         device_text = f"GPU: {device_name}" if torch.cuda.is_available() else f"CPU: {device_name}"
         cv2.putText(frame, device_text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
+        # Display current view mode
+        view_text = f"View: {current_view.upper()} (Press A+S to toggle)"
+        text_size = cv2.getTextSize(view_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+        text_x = frame.shape[1] - text_size[0] - 10
+        cv2.putText(frame, view_text, (text_x, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        
         combined_frame = np.vstack((frame, ui_panel))
 
-        # Show the result
-        cv2.imshow("YOLOv11 Detection", combined_frame)
+        # Show/hide windows based on current view mode
+        if current_view == 'both' or current_view == 'camera':
+            cv2.imshow("YOLOv11 Detection", combined_frame)
+        else:
+            try:
+                cv2.destroyWindow("YOLOv11 Detection")
+            except cv2.error:
+                pass  # Window doesn't exist, ignore
+        
+        if current_view == 'both' or current_view == 'kiosk':
+            kiosk_frame = draw_kiosk_ui(sorting_history, current_view)
+            cv2.namedWindow("GoSort Kiosk - Sorting Display", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("GoSort Kiosk - Sorting Display", 1920, 1080)
+            cv2.imshow("GoSort Kiosk - Sorting Display", kiosk_frame)
+            
+            # Maximize kiosk window on first display
+            if not kiosk_maximized:
+                try:
+                    # Small delay to ensure window is created
+                    time.sleep(0.1)
+                    # Try to maximize using Windows API if on Windows
+                    if platform.system() == 'Windows':
+                        import ctypes
+                        hwnd = ctypes.windll.user32.FindWindowW(None, "GoSort Kiosk - Sorting Display")
+                        if hwnd:
+                            # SW_MAXIMIZE = 3
+                            ctypes.windll.user32.ShowWindow(hwnd, 3)
+                    else:
+                        # On other platforms, use fullscreen mode
+                        cv2.setWindowProperty("GoSort Kiosk - Sorting Display", 
+                                            cv2.WND_PROP_FULLSCREEN, 
+                                            cv2.WINDOW_FULLSCREEN)
+                    kiosk_maximized = True
+                except Exception as e:
+                    # Fallback: set to a large size
+                    cv2.resizeWindow("GoSort Kiosk - Sorting Display", 1920, 1080)
+                    kiosk_maximized = True
+        else:
+            try:
+                cv2.destroyWindow("GoSort Kiosk - Sorting Display")
+            except cv2.error:
+                pass  # Window doesn't exist, ignore
         
         # Handle mouse events
         def mouse_callback(event, x, y, flags, param):
+            nonlocal current_cam_idx, stream, ip_address
             if event == cv2.EVENT_LBUTTONDOWN:
                 # Adjust y coordinate to account for the main frame
                 y = y - frame.shape[0]
@@ -1072,7 +1373,19 @@ def main():
                         if command_handler:
                             command_handler.stop()
                         exit()
-                    elif 330 <= x <= 470:  # Reconfigure All button
+                    elif 330 <= x <= 490:  # Switch Camera button
+                        if len(available_cams) > 1:
+                            print("\n🔄 Switching camera...")
+                            stream.stop()
+                            current_cam_idx = (current_cam_idx + 1) % len(available_cams)
+                            cam_index = available_cams[current_cam_idx]
+                            print(f"Switched to camera {current_cam_idx + 1}/{len(available_cams)} (Index: {cam_index})")
+                            # Restart video stream with new camera
+                            stream = VideoStream(cam_index).start()
+                            time.sleep(1.0)
+                        else:
+                            print("\n⚠️ Only one camera available")
+                    elif 510 <= x <= 650:  # Reconfigure All button
                         print("\nReconfiguring All Settings")
                         # Clear all configuration
                         config = {}
@@ -1083,17 +1396,51 @@ def main():
                         if command_handler:
                             command_handler.stop()
                         exit()
-                    elif 490 <= x <= 630:  # Exit button
+                    elif 670 <= x <= 810:  # Exit button
                         cv2.destroyAllWindows()
                         stream.stop()
                         if command_handler:
                             command_handler.stop()
                         exit()
 
-        cv2.setMouseCallback("YOLOv11 Detection", mouse_callback)
+        # Set mouse callback only if camera window is visible
+        if current_view == 'both' or current_view == 'camera':
+            try:
+                cv2.setMouseCallback("YOLOv11 Detection", mouse_callback)
+            except cv2.error:
+                pass  # Window doesn't exist, ignore
         
-        # Wait for key press (reduced wait time for smoother UI)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        # Handle keyboard input - check for A+S hotkey
+        key = cv2.waitKey(1) & 0xFF
+        
+        # Check for 'a' or 'A' key
+        if key == ord('a') or key == ord('A'):
+            a_key_pressed = True
+            a_key_time = time.time()
+        
+        # Check for 's' or 'S' key (after 'a' was pressed)
+        if (key == ord('s') or key == ord('S')) and a_key_pressed:
+            # Check if 'a' was pressed recently (within 0.5 seconds)
+            if time.time() - a_key_time < 0.5:
+                # Toggle view mode
+                if current_view == 'both':
+                    current_view = 'camera'
+                    print("\n🔄 Switched to Camera view only (Press A+S to toggle)")
+                elif current_view == 'camera':
+                    current_view = 'kiosk'
+                    print("\n🔄 Switched to Kiosk view only (Press A+S to toggle)")
+                elif current_view == 'kiosk':
+                    current_view = 'both'
+                    print("\n🔄 Switched to Both views (Press A+S to toggle)")
+            a_key_pressed = False
+        
+        # Reset 'a' key flag if too much time has passed
+        if a_key_pressed and time.time() - a_key_time > 0.5:
+            a_key_pressed = False
+        
+        # Quit on 'q' or ESC key
+        if key == ord('q') or key == 27:  # 27 is ESC key
+            print("\n👋 Exiting application...")
             break
 
     # Release resources
